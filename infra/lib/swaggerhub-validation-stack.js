@@ -31,9 +31,16 @@ class SwaggerHubValidationStack extends cdk.Stack {
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       lifecycleRules: [
         {
-          // Auto-delete reports after 90 days
-          expiration: cdk.Duration.days(90),
-          id: 'DeleteOldReports',
+          // Move reports to Glacier after 90 days for cost-effective long-term archive
+          id: 'ArchiveOldReports',
+          transitions: [
+            {
+              storageClass: s3.StorageClass.GLACIER,
+              transitionAfter: cdk.Duration.days(90),
+            },
+          ],
+          // Permanently delete after 365 days
+          expiration: cdk.Duration.days(365),
         },
       ],
       versioned: false,
@@ -71,7 +78,7 @@ class SwaggerHubValidationStack extends cdk.Stack {
         REPORT_TITLE: 'API Validation Report',
         NODE_OPTIONS: '--enable-source-maps',
       },
-      logRetention: logs.RetentionDays.TWO_WEEKS,
+      logRetention: logs.RetentionDays.THREE_MONTHS,
       description: 'Processes SwaggerHub webhooks, validates API specs, generates PDF reports',
     });
 
@@ -84,6 +91,20 @@ class SwaggerHubValidationStack extends cdk.Stack {
         effect: iam.Effect.ALLOW,
         actions: ['ses:SendRawEmail', 'ses:SendEmail'],
         resources: ['*'], // Scope this to specific identities in production
+      })
+    );
+
+    // Grant Lambda permissions to publish CloudWatch custom metrics
+    validationLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['cloudwatch:PutMetricData'],
+        resources: ['*'],
+        conditions: {
+          StringEquals: {
+            'cloudwatch:namespace': 'SwaggerHubValidation',
+          },
+        },
       })
     );
 

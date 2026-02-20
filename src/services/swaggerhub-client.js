@@ -6,11 +6,13 @@
  */
 
 const axios = require('axios');
+const { createLogger } = require('./logger');
 
 class SwaggerHubClient {
   constructor(config) {
     this.baseUrl = config.baseUrl || 'https://api.swaggerhub.com';
     this.apiKey = config.apiKey;
+    this.log = createLogger({ component: 'swaggerhub-client' });
 
     this.http = axios.create({
       baseURL: this.baseUrl,
@@ -38,7 +40,7 @@ class SwaggerHubClient {
         url = `/apis/${owner}/${apiName}`;
       }
 
-      console.log(`Fetching API spec from SwaggerHub: ${url}`);
+      this.log.info('spec.fetching', { url });
 
       const response = await this.http.get(url, {
         headers: { Accept: 'application/json' },
@@ -76,7 +78,7 @@ class SwaggerHubClient {
       const response = await this.http.get(`/apis/${owner}/${apiName}/settings/default`);
       return response.data;
     } catch (error) {
-      console.warn(`Could not fetch metadata for ${owner}/${apiName}:`, error.message);
+      this.log.warn('metadata.fetch-failed', { owner, apiName, errorMessage: error.message });
       return null;
     }
   }
@@ -92,7 +94,7 @@ class SwaggerHubClient {
       const response = await this.http.get(`/apis/${owner}/${apiName}`);
       return response.data?.apis?.map((a) => a.properties?.find((p) => p.type === 'X-Version')?.value) || [];
     } catch (error) {
-      console.warn(`Could not list versions for ${owner}/${apiName}:`, error.message);
+      this.log.warn('versions.list-failed', { owner, apiName, errorMessage: error.message });
       return [];
     }
   }

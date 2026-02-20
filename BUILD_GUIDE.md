@@ -81,6 +81,8 @@ Create a file called `package.json` in the root of your project folder. You can 
     "@stoplight/spectral-runtime": "^1.1.0",
     "@aws-sdk/client-s3": "^3.400.0",
     "@aws-sdk/client-ses": "^3.400.0",
+    "@aws-sdk/client-cloudwatch": "^3.400.0",
+    "@aws-sdk/s3-request-presigner": "^3.400.0",
     "pdfkit": "^0.13.0",
     "axios": "^1.6.0",
     "js-yaml": "^4.1.0"
@@ -101,6 +103,8 @@ Create a file called `package.json` in the root of your project folder. You can 
 - `@stoplight/spectral-core`, `spectral-rulesets`, `spectral-parsers`, `spectral-runtime` — The Spectral linting engine that validates OpenAPI specs
 - `@aws-sdk/client-s3` — AWS SDK to upload PDF reports to S3
 - `@aws-sdk/client-ses` — AWS SDK to send emails via SES
+- `@aws-sdk/client-cloudwatch` — AWS SDK to publish custom CloudWatch metrics
+- `@aws-sdk/s3-request-presigner` — Generates presigned S3 download URLs
 - `pdfkit` — Generates PDF documents in Node.js
 - `axios` — HTTP client to call the SwaggerHub API
 - `js-yaml` — YAML parser (for YAML-format specs)
@@ -198,7 +202,7 @@ module.exports = {
 
 ## Step 6: Create the Lambda Handler (Main Entry Point)
 
-This is the main file that runs when the Lambda is triggered. It orchestrates the entire pipeline, including comparing against the previous scan to produce an incremental diff.
+This is the main file that runs when the Lambda is triggered. It orchestrates the entire pipeline, including comparing against the previous scan to produce an incremental diff. It uses structured logging (for CloudWatch Insights) and publishes custom CloudWatch metrics.
 
 **File: `src/handler.js`**
 ```javascript
@@ -216,18 +220,37 @@ const { S3Service } = require('./services/s3-service');
 const { EmailService } = require('./services/email-service');
 const { ScanHistoryService } = require('./services/scan-history-service');
 const { DiffEngine } = require('./services/diff-engine');
+const { createLogger } = require('./services/logger');
+const { MetricsService } = require('./services/metrics-service');
 const config = require('./config');
 
 /**
  * Main Lambda handler - entry point for API Gateway webhook
  */
-exports.handler = async (event) => {
-  console.log('Received webhook event:', JSON.stringify(event, null, 2));
+exports.handler = async (event, context) => {
+  const pipelineStart = Date.now();
+  const log = createLogger({
+    requestId: context?.awsRequestId || 'local',
+  });
+
+  log.info('webhook.received', { eventKeys: Object.keys(event) });
 
   try {
     // 1. Parse the SwaggerHub webhook payload
     const webhookPayload = parseWebhookEvent(event);
-    console.log('Parsed webhook payload:', JSON.stringify(webhookPayload, null, 2));
+    log.info('webhook.parsed', {
+      owner: webhookPayload.owner,
+      apiName: webhookPayload.apiName,
+      version: webhookPayload.version,
+      action: webhookPayload.action,
+    });
+
+    // Enrich logger with API context for all subsequent logs
+    const apiLog = log.child({
+      owner: webhookPayload.owner,
+      apiName: webhookPayload.apiName,
+      version: webhookPayload.version,
+    });
 
     // 2. Fetch the full API spec from SwaggerHub
     const swaggerHubClient = new SwaggerHubClient(config.swaggerHub);
@@ -236,12 +259,18 @@ exports.handler = async (event) => {
       webhookPayload.apiName,
       webhookPayload.version
     );
-    console.log(`Fetched API spec: ${webhookPayload.owner}/${webhookPayload.apiName}@${webhookPayload.version}`);
+    apiLog.info('spec.fetched');
 
     // 3. Validate the API spec
     const validationEngine = new ValidationEngine();
     const validationResults = await validationEngine.validate(apiSpec);
-    console.log(`Validation complete: ${validationResults.summary.totalIssues} issues found`);
+    apiLog.info('validation.complete', {
+      score: validationResults.summary.score,
+      totalIssues: validationResults.summary.totalIssues,
+      errors: validationResults.summary.errors,
+      warnings: validationResults.summary.warnings,
+      passed: validationResults.summary.passedValidation,
+    });
 
     // 3b. Compare against previous scan (incremental diff)
     const s3Service = new S3Service(config.aws);
@@ -255,9 +284,15 @@ exports.handler = async (event) => {
         webhookPayload.apiName
       );
       diff = diffEngine.compare(validationResults, previousScan);
-      console.log(`Diff: ${diff.resolvedIssues.length} resolved, ${diff.newIssues.length} new, score ${diff.scoreChange > 0 ? '+' : ''}${diff.scoreChange}`);
+      apiLog.info('diff.computed', {
+        resolvedCount: diff.resolvedIssues.length,
+        newCount: diff.newIssues.length,
+        persistingCount: diff.persistingIssues.length,
+        scoreChange: diff.scoreChange,
+        isFirstScan: diff.isFirstScan,
+      });
     } catch (error) {
-      console.warn('Could not compute diff (continuing without it):', error.message);
+      apiLog.warn('diff.failed', { errorMessage: error.message });
     }
 
     // 3c. Save current scan for future comparisons
@@ -268,11 +303,13 @@ exports.handler = async (event) => {
         webhookPayload.version,
         validationResults
       );
+      apiLog.info('scan-history.saved');
     } catch (error) {
-      console.warn('Could not save scan history (non-blocking):', error.message);
+      apiLog.warn('scan-history.save-failed', { errorMessage: error.message });
     }
 
     // 4. Generate PDF report (with diff if available)
+    const reportStart = Date.now();
     const reportGenerator = new ReportGenerator();
     const pdfBuffer = await reportGenerator.generate({
       apiName: webhookPayload.apiName,
@@ -282,12 +319,13 @@ exports.handler = async (event) => {
       diff,
       generatedAt: new Date().toISOString(),
     });
-    console.log('PDF report generated');
+    const reportGenTimeMs = Date.now() - reportStart;
+    apiLog.info('report.generated', { sizeBytes: pdfBuffer.length, durationMs: reportGenTimeMs });
 
     // 5. Upload report to S3
     const reportKey = `reports/${webhookPayload.owner}/${webhookPayload.apiName}/${webhookPayload.version}/validation-report-${Date.now()}.pdf`;
     const reportUrl = await s3Service.uploadReport(reportKey, pdfBuffer);
-    console.log(`Report uploaded to S3: ${reportUrl}`);
+    apiLog.info('report.uploaded', { reportKey });
 
     // 6. Send email notification with report
     const emailService = new EmailService(config.aws);
@@ -301,7 +339,29 @@ exports.handler = async (event) => {
       validationSummary: validationResults.summary,
       diff,
     });
-    console.log('Email sent successfully');
+    apiLog.info('email.sent', {
+      recipient: webhookPayload.notifyEmail || config.defaultNotifyEmail,
+    });
+
+    // 7. Publish CloudWatch metrics
+    const totalDurationMs = Date.now() - pipelineStart;
+    const metricsService = new MetricsService(config.aws);
+    try {
+      await metricsService.recordValidation({
+        owner: webhookPayload.owner,
+        apiName: webhookPayload.apiName,
+        version: webhookPayload.version,
+        summary: validationResults.summary,
+        diff,
+        reportGenTimeMs,
+        totalDurationMs,
+      });
+      apiLog.info('metrics.published');
+    } catch (error) {
+      apiLog.warn('metrics.publish-failed', { errorMessage: error.message });
+    }
+
+    apiLog.info('pipeline.complete', { totalDurationMs });
 
     return {
       statusCode: 200,
@@ -312,7 +372,7 @@ exports.handler = async (event) => {
       }),
     };
   } catch (error) {
-    console.error('Error processing webhook:', error);
+    log.error('pipeline.failed', error);
     return {
       statusCode: 500,
       body: JSON.stringify({
@@ -993,6 +1053,205 @@ module.exports = { DiffEngine };
 - If it's only in the current scan → new issue
 - If it's only in the previous scan → resolved issue
 - This approach is robust even when messages change slightly between versions
+
+---
+
+## Step 9c: Create the Structured Logger
+
+This replaces plain `console.log()` with structured JSON logging. In Lambda, every log entry is a single-line JSON object that CloudWatch Insights can query by field (level, event, apiName, score, etc.). In local mode, it falls back to readable text output.
+
+**File: `src/services/logger.js`**
+```javascript
+/**
+ * Structured Logger - JSON-formatted logging for CloudWatch Insights
+ *
+ * Replaces plain console.log() with structured JSON output so logs can be
+ * queried in CloudWatch Insights using fields like:
+ *   fields @timestamp, level, event, apiName, owner, score
+ *   | filter level = "ERROR"
+ *   | sort @timestamp desc
+ *
+ * In local/test mode, falls back to readable console output.
+ */
+
+class Logger {
+  constructor(context = {}) {
+    this.context = {
+      service: 'swaggerhub-validation',
+      ...context,
+    };
+    this.isLocal = process.env.IS_LOCAL === 'true' || !process.env.AWS_LAMBDA_FUNCTION_NAME;
+  }
+
+  child(additionalContext) {
+    return new Logger({ ...this.context, ...additionalContext });
+  }
+
+  info(event, data = {}) {
+    this._log('INFO', event, data);
+  }
+
+  warn(event, data = {}) {
+    this._log('WARN', event, data);
+  }
+
+  error(event, data = {}) {
+    if (data instanceof Error) {
+      data = {
+        errorMessage: data.message,
+        errorName: data.name,
+        stackTrace: data.stack,
+      };
+    }
+    this._log('ERROR', event, data);
+  }
+
+  debug(event, data = {}) {
+    if (this.isLocal || process.env.LOG_LEVEL === 'DEBUG') {
+      this._log('DEBUG', event, data);
+    }
+  }
+
+  _log(level, event, data) {
+    const entry = {
+      timestamp: new Date().toISOString(),
+      level,
+      event,
+      ...this.context,
+      ...data,
+    };
+
+    Object.keys(entry).forEach((key) => {
+      if (entry[key] === undefined) delete entry[key];
+    });
+
+    if (this.isLocal) {
+      const prefix = `[${level}]`;
+      const dataStr = Object.keys(data).length > 0 ? ` ${JSON.stringify(data)}` : '';
+      console.log(`${prefix} ${event}${dataStr}`);
+    } else {
+      console.log(JSON.stringify(entry));
+    }
+  }
+}
+
+function createLogger(context) {
+  return new Logger(context);
+}
+
+module.exports = { Logger, createLogger };
+```
+
+**How it works:**
+- In Lambda: outputs `{"timestamp":"...","level":"INFO","event":"validation.complete","score":85,...}` — one JSON per line, queryable by CloudWatch Insights
+- Locally: outputs `[INFO] validation.complete {"score":85}` — human-friendly
+- `child()` creates a new logger that inherits parent context and adds more fields (e.g., requestId → owner → apiName)
+- Error objects are automatically destructured into `errorMessage`, `errorName`, `stackTrace`
+- DEBUG-level logs are suppressed in production unless `LOG_LEVEL=DEBUG`
+
+---
+
+## Step 9d: Create the CloudWatch Metrics Service
+
+This publishes custom CloudWatch metrics after each validation run so you can build dashboards, set alarms, and track trends over time.
+
+**File: `src/services/metrics-service.js`**
+```javascript
+const { CloudWatchClient, PutMetricDataCommand } = require('@aws-sdk/client-cloudwatch');
+
+const NAMESPACE = 'SwaggerHubValidation';
+
+class MetricsService {
+  constructor(awsConfig = {}) {
+    this.cloudwatch = new CloudWatchClient({ region: awsConfig.region || process.env.AWS_REGION || 'us-east-1' });
+    this.enabled = process.env.METRICS_ENABLED !== 'false' && !!process.env.AWS_LAMBDA_FUNCTION_NAME;
+    this._buffer = [];
+  }
+
+  async recordValidation(params) {
+    if (!this.enabled) return;
+
+    const { owner, apiName, version, summary, diff, reportGenTimeMs, totalDurationMs } = params;
+    const timestamp = new Date();
+
+    const dimensions = [
+      { Name: 'Owner', Value: owner },
+      { Name: 'ApiName', Value: apiName },
+    ];
+    const globalDimensions = [{ Name: 'Service', Value: 'SwaggerHubValidation' }];
+
+    // Per-API metrics
+    this._addMetric('ValidationScore', summary.score, 'None', dimensions, timestamp);
+    this._addMetric('TotalIssues', summary.totalIssues, 'Count', dimensions, timestamp);
+    this._addMetric('ErrorCount', summary.errors, 'Count', dimensions, timestamp);
+    this._addMetric('WarningCount', summary.warnings, 'Count', dimensions, timestamp);
+    this._addMetric('ValidationPassed', summary.passedValidation ? 1 : 0, 'Count', dimensions, timestamp);
+
+    // Global aggregate metrics
+    this._addMetric('ValidationScore', summary.score, 'None', globalDimensions, timestamp);
+    this._addMetric('TotalIssues', summary.totalIssues, 'Count', globalDimensions, timestamp);
+    this._addMetric('ValidationPassed', summary.passedValidation ? 1 : 0, 'Count', globalDimensions, timestamp);
+
+    // Diff metrics
+    if (diff && !diff.isFirstScan) {
+      this._addMetric('ScoreChange', diff.scoreChange, 'None', dimensions, timestamp);
+      this._addMetric('ResolvedIssues', diff.resolvedIssues.length, 'Count', dimensions, timestamp);
+      this._addMetric('NewIssues', diff.newIssues.length, 'Count', dimensions, timestamp);
+    }
+
+    // Performance metrics
+    if (reportGenTimeMs != null) this._addMetric('ReportGenerationTime', reportGenTimeMs, 'Milliseconds', globalDimensions, timestamp);
+    if (totalDurationMs != null) this._addMetric('PipelineDuration', totalDurationMs, 'Milliseconds', globalDimensions, timestamp);
+
+    await this._flush();
+  }
+
+  _addMetric(name, value, unit, dimensions, timestamp) {
+    this._buffer.push({ MetricName: name, Value: value, Unit: unit, Dimensions: dimensions, Timestamp: timestamp });
+  }
+
+  async _flush() {
+    const batches = [];
+    for (let i = 0; i < this._buffer.length; i += 25) {
+      batches.push(this._buffer.slice(i, i + 25));
+    }
+    for (const batch of batches) {
+      try {
+        await this.cloudwatch.send(new PutMetricDataCommand({ Namespace: NAMESPACE, MetricData: batch }));
+      } catch (error) {
+        console.warn('Failed to publish CloudWatch metrics:', error.message);
+      }
+    }
+    this._buffer = [];
+  }
+}
+
+module.exports = { MetricsService };
+```
+
+**Metrics published per run:**
+
+| Metric | Type | Dimensions | Description |
+|--------|------|------------|-------------|
+| `ValidationScore` | None (0-100) | Owner, ApiName | Quality score |
+| `TotalIssues` | Count | Owner, ApiName | Total issues found |
+| `ErrorCount` | Count | Owner, ApiName | Errors only |
+| `WarningCount` | Count | Owner, ApiName | Warnings only |
+| `ValidationPassed` | Count (0/1) | Owner, ApiName | Pass/fail flag |
+| `ScoreChange` | None | Owner, ApiName | Delta vs previous scan |
+| `ResolvedIssues` | Count | Owner, ApiName | Issues fixed since last scan |
+| `NewIssues` | Count | Owner, ApiName | Issues introduced since last scan |
+| `ReportGenerationTime` | Milliseconds | Service | PDF generation time |
+| `PipelineDuration` | Milliseconds | Service | Total end-to-end time |
+
+**CloudWatch dashboard query examples:**
+```
+# Average validation score over time
+SELECT AVG(ValidationScore) FROM SwaggerHubValidation WHERE Service = 'SwaggerHubValidation' GROUP BY ApiName
+
+# APIs failing validation
+SELECT COUNT(ValidationPassed) FROM SwaggerHubValidation WHERE ValidationPassed = 0
+```
 
 ---
 
@@ -2474,9 +2733,16 @@ class SwaggerHubValidationStack extends cdk.Stack {
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       lifecycleRules: [
         {
-          // Auto-delete reports after 90 days
-          expiration: cdk.Duration.days(90),
-          id: 'DeleteOldReports',
+          // Move reports to Glacier after 90 days for cost-effective long-term archive
+          id: 'ArchiveOldReports',
+          transitions: [
+            {
+              storageClass: s3.StorageClass.GLACIER,
+              transitionAfter: cdk.Duration.days(90),
+            },
+          ],
+          // Permanently delete after 365 days
+          expiration: cdk.Duration.days(365),
         },
       ],
       versioned: false,
@@ -2514,7 +2780,7 @@ class SwaggerHubValidationStack extends cdk.Stack {
         REPORT_TITLE: 'API Validation Report',
         NODE_OPTIONS: '--enable-source-maps',
       },
-      logRetention: logs.RetentionDays.TWO_WEEKS,
+      logRetention: logs.RetentionDays.THREE_MONTHS,
       description: 'Processes SwaggerHub webhooks, validates API specs, generates PDF reports',
     });
 
@@ -2527,6 +2793,20 @@ class SwaggerHubValidationStack extends cdk.Stack {
         effect: iam.Effect.ALLOW,
         actions: ['ses:SendRawEmail', 'ses:SendEmail'],
         resources: ['*'], // Scope this to specific identities in production
+      })
+    );
+
+    // Grant Lambda permissions to publish CloudWatch custom metrics
+    validationLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['cloudwatch:PutMetricData'],
+        resources: ['*'],
+        conditions: {
+          StringEquals: {
+            'cloudwatch:namespace': 'SwaggerHubValidation',
+          },
+        },
       })
     );
 
@@ -2806,6 +3086,8 @@ SwaggerHubReport/
 │   └── services/
 │       ├── diff-engine.js
 │       ├── email-service.js
+│       ├── logger.js
+│       ├── metrics-service.js
 │       ├── report-generator.js
 │       ├── s3-service.js
 │       ├── scan-history-service.js
@@ -2821,4 +3103,4 @@ SwaggerHubReport/
         └── swaggerhub-validation-stack.js
 ```
 
-Total: **16 files** you create manually, plus `node_modules/` and `package-lock.json` are generated by `npm install`.
+Total: **18 files** you create manually, plus `node_modules/` and `package-lock.json` are generated by `npm install`.

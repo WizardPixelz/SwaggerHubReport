@@ -12,18 +12,37 @@ const { S3Service } = require('./services/s3-service');
 const { EmailService } = require('./services/email-service');
 const { ScanHistoryService } = require('./services/scan-history-service');
 const { DiffEngine } = require('./services/diff-engine');
+const { createLogger } = require('./services/logger');
+const { MetricsService } = require('./services/metrics-service');
 const config = require('./config');
 
 /**
  * Main Lambda handler - entry point for API Gateway webhook
  */
-exports.handler = async (event) => {
-  console.log('Received webhook event:', JSON.stringify(event, null, 2));
+exports.handler = async (event, context) => {
+  const pipelineStart = Date.now();
+  const log = createLogger({
+    requestId: context?.awsRequestId || 'local',
+  });
+
+  log.info('webhook.received', { eventKeys: Object.keys(event) });
 
   try {
     // 1. Parse the SwaggerHub webhook payload
     const webhookPayload = parseWebhookEvent(event);
-    console.log('Parsed webhook payload:', JSON.stringify(webhookPayload, null, 2));
+    log.info('webhook.parsed', {
+      owner: webhookPayload.owner,
+      apiName: webhookPayload.apiName,
+      version: webhookPayload.version,
+      action: webhookPayload.action,
+    });
+
+    // Enrich logger with API context for all subsequent logs
+    const apiLog = log.child({
+      owner: webhookPayload.owner,
+      apiName: webhookPayload.apiName,
+      version: webhookPayload.version,
+    });
 
     // 2. Fetch the full API spec from SwaggerHub
     const swaggerHubClient = new SwaggerHubClient(config.swaggerHub);
@@ -32,12 +51,18 @@ exports.handler = async (event) => {
       webhookPayload.apiName,
       webhookPayload.version
     );
-    console.log(`Fetched API spec: ${webhookPayload.owner}/${webhookPayload.apiName}@${webhookPayload.version}`);
+    apiLog.info('spec.fetched');
 
     // 3. Validate the API spec
     const validationEngine = new ValidationEngine();
     const validationResults = await validationEngine.validate(apiSpec);
-    console.log(`Validation complete: ${validationResults.summary.totalIssues} issues found`);
+    apiLog.info('validation.complete', {
+      score: validationResults.summary.score,
+      totalIssues: validationResults.summary.totalIssues,
+      errors: validationResults.summary.errors,
+      warnings: validationResults.summary.warnings,
+      passed: validationResults.summary.passedValidation,
+    });
 
     // 3b. Compare against previous scan (incremental diff)
     const s3Service = new S3Service(config.aws);
@@ -51,9 +76,15 @@ exports.handler = async (event) => {
         webhookPayload.apiName
       );
       diff = diffEngine.compare(validationResults, previousScan);
-      console.log(`Diff: ${diff.resolvedIssues.length} resolved, ${diff.newIssues.length} new, score ${diff.scoreChange > 0 ? '+' : ''}${diff.scoreChange}`);
+      apiLog.info('diff.computed', {
+        resolvedCount: diff.resolvedIssues.length,
+        newCount: diff.newIssues.length,
+        persistingCount: diff.persistingIssues.length,
+        scoreChange: diff.scoreChange,
+        isFirstScan: diff.isFirstScan,
+      });
     } catch (error) {
-      console.warn('Could not compute diff (continuing without it):', error.message);
+      apiLog.warn('diff.failed', { errorMessage: error.message });
     }
 
     // 3c. Save current scan for future comparisons
@@ -64,11 +95,13 @@ exports.handler = async (event) => {
         webhookPayload.version,
         validationResults
       );
+      apiLog.info('scan-history.saved');
     } catch (error) {
-      console.warn('Could not save scan history (non-blocking):', error.message);
+      apiLog.warn('scan-history.save-failed', { errorMessage: error.message });
     }
 
     // 4. Generate PDF report (with diff if available)
+    const reportStart = Date.now();
     const reportGenerator = new ReportGenerator();
     const pdfBuffer = await reportGenerator.generate({
       apiName: webhookPayload.apiName,
@@ -78,12 +111,13 @@ exports.handler = async (event) => {
       diff,
       generatedAt: new Date().toISOString(),
     });
-    console.log('PDF report generated');
+    const reportGenTimeMs = Date.now() - reportStart;
+    apiLog.info('report.generated', { sizeBytes: pdfBuffer.length, durationMs: reportGenTimeMs });
 
     // 5. Upload report to S3
     const reportKey = `reports/${webhookPayload.owner}/${webhookPayload.apiName}/${webhookPayload.version}/validation-report-${Date.now()}.pdf`;
     const reportUrl = await s3Service.uploadReport(reportKey, pdfBuffer);
-    console.log(`Report uploaded to S3: ${reportUrl}`);
+    apiLog.info('report.uploaded', { reportKey });
 
     // 6. Send email notification with report
     const emailService = new EmailService(config.aws);
@@ -97,7 +131,29 @@ exports.handler = async (event) => {
       validationSummary: validationResults.summary,
       diff,
     });
-    console.log('Email sent successfully');
+    apiLog.info('email.sent', {
+      recipient: webhookPayload.notifyEmail || config.defaultNotifyEmail,
+    });
+
+    // 7. Publish CloudWatch metrics
+    const totalDurationMs = Date.now() - pipelineStart;
+    const metricsService = new MetricsService(config.aws);
+    try {
+      await metricsService.recordValidation({
+        owner: webhookPayload.owner,
+        apiName: webhookPayload.apiName,
+        version: webhookPayload.version,
+        summary: validationResults.summary,
+        diff,
+        reportGenTimeMs,
+        totalDurationMs,
+      });
+      apiLog.info('metrics.published');
+    } catch (error) {
+      apiLog.warn('metrics.publish-failed', { errorMessage: error.message });
+    }
+
+    apiLog.info('pipeline.complete', { totalDurationMs });
 
     return {
       statusCode: 200,
@@ -108,7 +164,7 @@ exports.handler = async (event) => {
       }),
     };
   } catch (error) {
-    console.error('Error processing webhook:', error);
+    log.error('pipeline.failed', error);
     return {
       statusCode: 500,
       body: JSON.stringify({

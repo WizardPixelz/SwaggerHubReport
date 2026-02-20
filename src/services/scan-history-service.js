@@ -8,11 +8,13 @@
  */
 
 const { S3Client, PutObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
+const { createLogger } = require('./logger');
 
 class ScanHistoryService {
   constructor(awsConfig) {
     this.s3 = new S3Client({ region: awsConfig.region });
     this.bucket = awsConfig.s3Bucket;
+    this.log = createLogger({ component: 'scan-history' });
   }
 
   /**
@@ -40,10 +42,10 @@ class ScanHistoryService {
       return JSON.parse(bodyString);
     } catch (error) {
       if (error.name === 'NoSuchKey' || error.$metadata?.httpStatusCode === 404) {
-        console.log(`No previous scan found for ${owner}/${apiName} (first scan)`);
+        this.log.info('scan-history.not-found', { owner, apiName, reason: 'first scan' });
         return null;
       }
-      console.warn(`Error retrieving scan history for ${owner}/${apiName}:`, error.message);
+      this.log.warn('scan-history.retrieve-failed', { owner, apiName, errorMessage: error.message });
       return null;
     }
   }
@@ -78,7 +80,7 @@ class ScanHistoryService {
     });
 
     await this.s3.send(command);
-    console.log(`Scan history saved for ${owner}/${apiName}@${version}`);
+    this.log.info('scan-history.saved', { owner, apiName, version });
   }
 }
 
