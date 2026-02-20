@@ -1,0 +1,106 @@
+SwaggerHub Validation Report — Services Used
+=============================================
+
+
+NATIVE TO AWS (managed services and SDKs provided by Amazon)
+-------------------------------------------------------------
+  1. AWS Lambda                   — Serverless compute; runs the validation pipeline on each webhook trigger
+  2. Amazon API Gateway           — REST endpoint that receives SwaggerHub webhook POST requests
+  3. Amazon S3                    — Stores generated PDF reports and scan history JSON files
+  4. Amazon SES                   — Sends validation report emails with PDF attachments
+  5. Amazon CloudWatch Logs       — Receives structured JSON logs from the Lambda function
+  6. Amazon CloudWatch Metrics    — Custom metrics (validation scores, issue counts, pipeline duration)
+  7. AWS IAM                      — Manages roles and policies for Lambda to access S3, SES, and CloudWatch
+  8. AWS CDK / CDK CLI            — Infrastructure-as-code framework to provision all AWS resources
+  9. @aws-sdk/client-s3           — SDK module for S3 PutObject, GetObject operations
+ 10. @aws-sdk/s3-request-presigner — SDK module for presigned S3 download URLs (7-day expiry)
+ 11. @aws-sdk/client-ses           — SDK module for SES SendRawEmail (MIME multipart with attachment)
+ 12. @aws-sdk/client-cloudwatch    — SDK module for CloudWatch PutMetricData
+
+
+NATIVE TO SWAGGERHUB (provided by SmartBear / SwaggerHub platform)
+-------------------------------------------------------------------
+ 13. SwaggerHub Registry API      — Source of OpenAPI specifications (fetched via REST)
+ 14. SwaggerHub Webhooks          — Triggers the pipeline when an API is created or updated
+
+
+THIRD-PARTY OPEN SOURCE (external libraries, not ours, not AWS/SwaggerHub)
+---------------------------------------------------------------------------
+ 15. PDFKit (pdfkit)              — Node.js PDF generation library
+ 16. Axios (axios)                — HTTP client library
+ 17. js-yaml                      — YAML parser library
+ 18. Node.js (>=18.x)            — JavaScript runtime
+ 19. Jest (jest)                  — Unit testing framework (dev only)
+ 20. ESLint (eslint)             — JavaScript linter (dev only)
+
+ [Removed] Spectral Core, Rulesets, Parsers, Runtime — Replaced by SwaggerHub Standardization API
+
+
+CUSTOM / OUR OWN (built specifically for this project)
+------------------------------------------------------
+Each item lists available AWS or SwaggerHub alternatives, if any.
+  [*] = Recommended option
+
+ 25. Lambda Handler (handler.js)                  — Orchestrates the full pipeline end-to-end
+     a) [*] KEEP CUSTOM — Simple glue code; no simpler alternative
+     b) AWS Step Functions — Visual workflow orchestrator; overkill for a single linear pipeline
+
+ 26. Validation Engine (validation-engine.js)      — Processes SwaggerHub Standardization API results, scores & categorizes
+     a) [*] KEEP CUSTOM — SwaggerHub provides raw violations; our engine adds scoring, categorization & PDF-ready format
+
+ 27. Best-Practice Rules Reference (best-practices.js) — Documentation; rules managed in SwaggerHub Standardization
+     a) [*] KEEP CUSTOM — Lightweight reference file; actual rules live in SwaggerHub style guides
+
+ 28. Report Generator (report-generator.js)        — Builds branded multi-page PDF from validation results
+     a) [*] KEEP CUSTOM — No AWS or SwaggerHub service generates branded PDF validation reports
+     b) Amazon QuickSight — Dashboard/BI tool; could visualize trends but cannot produce per-scan PDF reports
+
+ 29. Diff Engine (diff-engine.js)                  — Compares current vs previous scan using fingerprinting
+     a) SwaggerHub API Versioning — Tracks version history and shows spec diffs in the UI
+     b) [*] KEEP CUSTOM — SwaggerHub diffs the spec text, not validation results; our engine diffs issues & scores
+
+ 30. Scan History Service (scan-history-service.js) — Stores/retrieves previous scans as JSON in S3
+     a) Amazon DynamoDB — Structured NoSQL storage; better querying, TTL, and indexing than S3 JSON files
+     b) [*] KEEP CUSTOM (S3) — Avoids adding a new AWS service; current S3 approach is simple and free-tier friendly
+     c) SwaggerHub Version History — Keeps spec versions, but not our validation results
+
+ 31. S3 Service (s3-service.js)                    — Uploads PDFs and generates presigned download URLs
+     a) [*] KEEP CUSTOM — Thin wrapper around the AWS SDK; nothing to replace
+
+ 32. Email Service (email-service.js)              — Assembles MIME email with inline summary + PDF attachment
+     a) Amazon SNS — Simple notifications (text/email); cannot attach PDFs or send rich HTML
+     b) Amazon Pinpoint — Campaign-oriented email with templates; heavier setup, better for bulk sends
+     c) [*] KEEP CUSTOM (SES) — SES is already the underlying transport; our service adds MIME assembly + branding
+
+ 33. SwaggerHub Client (swaggerhub-client.js)      — Fetches API specs from the SwaggerHub Registry API
+     a) SwaggerHub CLI — Official CLI tool; designed for terminal use, not Lambda invocation
+     b) [*] KEEP CUSTOM — Lightweight HTTP client purpose-built for Lambda; no official SwaggerHub Node.js SDK exists
+
+ 34. Structured Logger (logger.js)                 — JSON logging for CloudWatch Insights with context propagation
+     a) [*] AWS Lambda Powertools (Logger) — Official AWS library; structured JSON, context injection, log levels
+        npm: @aws-lambda-powertools/logger — Drop-in replacement with correlation IDs and sampling
+     b) KEEP CUSTOM — Our logger works but Powertools is battle-tested and AWS-maintained
+
+ 35. Metrics Service (metrics-service.js)          — Publishes custom CloudWatch metrics per validation run
+     a) [*] AWS Lambda Powertools (Metrics) — Official AWS library; publishes via CloudWatch Embedded Metric Format
+        npm: @aws-lambda-powertools/metrics — Zero-cost metric publishing via log lines (no PutMetricData API calls)
+     b) CloudWatch Embedded Metric Format (EMF) — Log-based metrics; same as Powertools but manual
+     c) KEEP CUSTOM — Works but requires explicit API calls; Powertools/EMF is cheaper and simpler
+
+ 36. Config Module (config.js)                     — Centralizes environment variable configuration
+     a) AWS Systems Manager Parameter Store — Centralized config with versioning, encryption, and cross-service sharing
+     b) AWS AppConfig — Feature flags and dynamic configuration with gradual rollout
+     c) [*] KEEP CUSTOM — Our config is small and static; Parameter Store adds latency and complexity for little gain
+
+ 37. CDK Stack (swaggerhub-validation-stack.js)    — Defines all AWS infrastructure as code
+     a) AWS CloudFormation — Raw template-based IaC; CDK compiles down to this
+     b) AWS SAM (Serverless Application Model) — Simplified serverless IaC; less verbose than raw CloudFormation
+     c) [*] KEEP CUSTOM (CDK) — CDK is already an AWS tool; our stack is the project-specific configuration
+
+
+SUMMARY OF RECOMMENDATIONS
+---------------------------
+  KEEP CUSTOM (no better alternative):  25, 26, 27, 28, 29, 30, 31, 32, 33, 36, 37
+  CONSIDER REPLACING:
+    34. logger.js        → AWS Lambda Powertools Logger  (better maintained, adds correlation IDs)
+    35. metrics-service.js → AWS Lambda Powertools Metrics (cheaper — uses EMF instead of API calls)

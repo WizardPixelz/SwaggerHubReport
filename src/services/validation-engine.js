@@ -1,132 +1,51 @@
 /**
- * Validation Engine - Uses Spectral to lint OpenAPI specifications
+ * Validation Engine - Processes SwaggerHub Standardization API results
  *
- * Validates against:
- * - OpenAPI 2.0/3.x spec compliance
- * - API design best practices (naming, descriptions, response codes, etc.)
+ * Instead of running Spectral locally, this engine consumes the validation
+ * errors returned by the SwaggerHub Standardization API endpoint:
+ *   GET /apis/{owner}/{api}/{version}/standardization
+ *
+ * The engine normalizes the response into our standard format with:
+ * - Categorized issues
+ * - Severity mapping
+ * - Numeric quality score (0-100)
+ * - Summary statistics
  */
-
-const { Spectral, Document } = require('@stoplight/spectral-core');
-const Parsers = require('@stoplight/spectral-parsers');
-const { oas } = require('@stoplight/spectral-rulesets');
-const { truthy, pattern } = require('@stoplight/spectral-functions');
 
 class ValidationEngine {
   constructor(options = {}) {
-    this.includeBestPractices = options.includeBestPractices !== false;
+    // Reserved for future options
   }
 
   /**
-   * Validate an OpenAPI specification
-   * @param {string|object} apiSpec - The OpenAPI spec (JSON string or object)
+   * Process standardization results from the SwaggerHub API
+   * @param {object} standardizationData - Response from GET .../standardization
+   *   Expected shape: { errors: [{ description, line, message, ruleName, severity }] }
+   *   Or: { result: { errors: [...] } }
    * @returns {object} Validation results with categorized issues and summary
    */
-  async validate(apiSpec) {
-    const spectral = new Spectral();
+  async validate(standardizationData) {
+    // The SwaggerHub API may return errors at the top level or nested under 'result'
+    const rawErrors = standardizationData.errors
+      || standardizationData.result?.errors
+      || [];
 
-    // Build combined ruleset: standard OAS rules + optional best practice rules
-    const rulesetDefinition = {
-      extends: [[oas, 'all']],
-      rules: {},
-    };
-
-    if (this.includeBestPractices) {
-      rulesetDefinition.rules = this.getBestPracticeRules();
-    }
-
-    spectral.setRuleset(rulesetDefinition);
-
-    // Parse the spec if it's a string
-    const specString = typeof apiSpec === 'string' ? apiSpec : JSON.stringify(apiSpec);
-
-    // Create a Spectral document
-    const document = new Document(specString, Parsers.Json, 'api-spec.json');
-
-    // Run validation
-    const diagnostics = await spectral.run(document);
-
-    // Categorize and format results
-    return this.formatResults(diagnostics);
-  }
-
-  /**
-   * Best practice rules using actual Spectral function references
-   */
-  getBestPracticeRules() {
-    return {
-      'bp-path-casing': {
-        description: 'API paths should use kebab-case (e.g., /my-resource)',
-        message: 'Path should use kebab-case. Avoid camelCase or snake_case in URLs.',
-        severity: 'warn',
-        given: '$.paths',
-        then: {
-          function: pattern,
-          functionOptions: { match: '^(/[a-z0-9\\-{}]+)+$' },
-          field: '@key',
-        },
-      },
-      'bp-request-body-required': {
-        description: 'POST, PUT, and PATCH operations should define a request body',
-        message: 'Operation should have a requestBody defined.',
-        severity: 'warn',
-        given: '$.paths[*][post,put,patch]',
-        then: {
-          function: truthy,
-          field: 'requestBody',
-        },
-      },
-      'bp-response-descriptions': {
-        description: 'All API responses should have meaningful descriptions',
-        message: 'Response should have a description.',
-        severity: 'warn',
-        given: '$.paths[*][*].responses[*]',
-        then: {
-          function: truthy,
-          field: 'description',
-        },
-      },
-      'bp-parameter-descriptions': {
-        description: 'All parameters should have descriptions',
-        message: 'Parameter should have a description.',
-        severity: 'info',
-        given: '$.paths[*][*].parameters[*]',
-        then: {
-          function: truthy,
-          field: 'description',
-        },
-      },
-      'bp-tags-description': {
-        description: 'Tags should have descriptions for better documentation',
-        message: 'Tag should have a description.',
-        severity: 'info',
-        given: '$.tags[*]',
-        then: {
-          function: truthy,
-          field: 'description',
-        },
-      },
-    };
-  }
-
-  /**
-   * Format Spectral diagnostics into a structured report
-   */
-  formatResults(diagnostics) {
-    const issues = diagnostics.map((d) => ({
-      code: d.code,
-      message: d.message,
-      severity: this.mapSeverity(d.severity),
-      severityLevel: d.severity,
-      path: d.path ? d.path.join('.') : '',
-      range: d.range
+    // Normalize each standardization error into our issue format
+    const issues = rawErrors.map((err) => ({
+      code: err.ruleName || err.rule || 'standardization',
+      message: err.message || err.description || 'Standardization violation',
+      severity: this.mapSeverity(err.severity),
+      severityLevel: this.mapSeverityLevel(err.severity),
+      path: err.pointer || err.path || (err.line ? `line ${err.line}` : ''),
+      range: err.line
         ? {
-            startLine: d.range.start.line + 1,
-            startCol: d.range.start.character + 1,
-            endLine: d.range.end.line + 1,
-            endCol: d.range.end.character + 1,
+            startLine: err.line,
+            startCol: err.character || 1,
+            endLine: err.line,
+            endCol: err.character || 1,
           }
         : null,
-      category: this.categorizeIssue(d.code),
+      category: this.categorizeIssue(err.ruleName || err.rule || ''),
     }));
 
     // Sort by severity (errors first)
@@ -148,64 +67,64 @@ class ValidationEngine {
   }
 
   /**
-   * Map Spectral severity numbers to human-readable labels
-   * Spectral: 0=Error, 1=Warning, 2=Information, 3=Hint
+   * Map SwaggerHub standardization severity to human-readable label
+   * SwaggerHub StandardizationRuleSeverity: ERROR, WARN/WARNING, INFO, HINT
    */
   mapSeverity(severity) {
-    const map = {
-      0: 'Error',
-      1: 'Warning',
-      2: 'Information',
-      3: 'Hint',
-    };
-    return map[severity] || 'Unknown';
+    if (!severity) return 'Warning';
+    const s = String(severity).toUpperCase();
+    if (s === 'ERROR' || s === '0') return 'Error';
+    if (s === 'WARN' || s === 'WARNING' || s === '1') return 'Warning';
+    if (s === 'INFO' || s === 'INFORMATION' || s === '2') return 'Information';
+    if (s === 'HINT' || s === '3') return 'Hint';
+    return 'Warning';
   }
 
   /**
-   * Categorize an issue based on its rule code
+   * Map severity to numeric level (for sorting)
+   * 0=Error, 1=Warning, 2=Information, 3=Hint
    */
-  categorizeIssue(code) {
-    const categories = {
-      // Spec compliance
-      'oas2-schema': 'Spec Compliance',
-      'oas3-schema': 'Spec Compliance',
-      'oas3-valid-schema-example': 'Spec Compliance',
-      'oas2-valid-schema-example': 'Spec Compliance',
-      'oas3-valid-media-example': 'Spec Compliance',
+  mapSeverityLevel(severity) {
+    if (!severity) return 1;
+    const s = String(severity).toUpperCase();
+    if (s === 'ERROR' || s === '0') return 0;
+    if (s === 'WARN' || s === 'WARNING' || s === '1') return 1;
+    if (s === 'INFO' || s === 'INFORMATION' || s === '2') return 2;
+    if (s === 'HINT' || s === '3') return 3;
+    return 1;
+  }
 
-      // Structure
-      'info-contact': 'Documentation',
-      'info-description': 'Documentation',
-      'info-license': 'Documentation',
-      'operation-description': 'Documentation',
-      'operation-operationId': 'Structure',
-      'operation-tags': 'Structure',
-      'path-params': 'Structure',
-      'no-eval-in-markdown': 'Security',
-      'no-script-tags-in-markdown': 'Security',
+  /**
+   * Categorize an issue based on its rule name
+   */
+  categorizeIssue(ruleName) {
+    const code = String(ruleName).toLowerCase();
 
-      // Naming & Design
-      'operation-operationId-valid-in-url': 'Naming Conventions',
-      'operation-operationId-unique': 'Naming Conventions',
-      'path-keys-no-trailing-slash': 'Naming Conventions',
-      'path-not-include-query': 'Naming Conventions',
+    // Spec compliance
+    if (code.includes('schema') || code.includes('oas2-') || code.includes('oas3-')) return 'Spec Compliance';
 
-      // Responses
-      'operation-success-response': 'Response Design',
-      'oas3-api-servers': 'Server Configuration',
-      'oas2-api-host': 'Server Configuration',
-      'oas2-api-schemes': 'Server Configuration',
+    // Documentation
+    if (code.includes('description') || code.includes('contact') || code.includes('license') || code.includes('info-')) return 'Documentation';
 
-      // Best practices
-      'bp-path-casing': 'Best Practice',
-      'bp-request-body-required': 'Best Practice',
-      'bp-response-descriptions': 'Best Practice',
-      'bp-parameter-descriptions': 'Best Practice',
-      'bp-schema-properties-descriptions': 'Best Practice',
-      'bp-no-numeric-ids-in-paths': 'Best Practice',
-    };
+    // Structure
+    if (code.includes('operationid') || code.includes('operation-tags') || code.includes('path-params')) return 'Structure';
 
-    return categories[code] || 'General';
+    // Security
+    if (code.includes('security') || code.includes('eval') || code.includes('script')) return 'Security';
+
+    // Naming
+    if (code.includes('casing') || code.includes('naming') || code.includes('path-key') || code.includes('trailing-slash')) return 'Naming Conventions';
+
+    // Response design
+    if (code.includes('response') || code.includes('success-response')) return 'Response Design';
+
+    // Server config
+    if (code.includes('server') || code.includes('host') || code.includes('scheme')) return 'Server Configuration';
+
+    // Best practice
+    if (code.includes('bp-') || code.includes('best-practice')) return 'Best Practice';
+
+    return 'General';
   }
 
   /**

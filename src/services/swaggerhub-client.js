@@ -98,6 +98,41 @@ class SwaggerHubClient {
       return [];
     }
   }
+
+  /**
+   * Fetch standardization errors for an API version from SwaggerHub
+   * Uses the GET /apis/{owner}/{api}/{version}/standardization endpoint
+   * @param {string} owner - API owner
+   * @param {string} apiName - API name
+   * @param {string} version - API version
+   * @returns {object} Standardization result with errors array
+   */
+  async fetchStandardizationErrors(owner, apiName, version) {
+    const url = `/apis/${owner}/${apiName}/${version}/standardization`;
+    this.log.info('standardization.fetching', { url });
+
+    try {
+      const response = await this.http.get(url);
+      return response.data;
+    } catch (error) {
+      if (error.response) {
+        const status = error.response.status;
+        const message = error.response.data?.message || error.message;
+
+        switch (status) {
+          case 401:
+            throw new Error(`SwaggerHub authentication failed. Check your API key. (${message})`);
+          case 403:
+            throw new Error(`Access denied to standardization for ${owner}/${apiName}. Check permissions. (${message})`);
+          case 404:
+            throw new Error(`Standardization not available for ${owner}/${apiName}@${version}. Ensure Standardization is enabled for your organization. (${message})`);
+          default:
+            throw new Error(`SwaggerHub standardization API error (${status}): ${message}`);
+        }
+      }
+      throw new Error(`Failed to fetch standardization errors: ${error.message}`);
+    }
+  }
 }
 
 module.exports = { SwaggerHubClient };

@@ -53,9 +53,18 @@ exports.handler = async (event, context) => {
     );
     apiLog.info('spec.fetched');
 
-    // 3. Validate the API spec
+    // 3. Fetch standardization errors from SwaggerHub & score them
+    const standardizationData = await swaggerHubClient.fetchStandardizationErrors(
+      webhookPayload.owner,
+      webhookPayload.apiName,
+      webhookPayload.version
+    );
+    apiLog.info('standardization.fetched', {
+      errorCount: (standardizationData.errors || []).length,
+    });
+
     const validationEngine = new ValidationEngine();
-    const validationResults = await validationEngine.validate(apiSpec);
+    const validationResults = await validationEngine.validate(standardizationData);
     apiLog.info('validation.complete', {
       score: validationResults.summary.score,
       totalIssues: validationResults.summary.totalIssues,

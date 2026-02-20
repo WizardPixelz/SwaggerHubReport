@@ -4,7 +4,7 @@
 
 **Architecture:**
 ```
-SwaggerHub (webhook) → API Gateway (POST /webhook) → Lambda → Spectral Validation
+SwaggerHub (webhook) → API Gateway (POST /webhook) → Lambda → SwaggerHub Standardization API
                                                           ↓
                                                    Diff vs Previous Scan (S3)
                                                           ↓
@@ -75,10 +75,6 @@ Create a file called `package.json` in the root of your project folder. You can 
     "package": "npm run build && cd dist && zip -r ../lambda.zip ."
   },
   "dependencies": {
-    "@stoplight/spectral-core": "^1.18.0",
-    "@stoplight/spectral-rulesets": "^1.18.0",
-    "@stoplight/spectral-parsers": "^1.0.0",
-    "@stoplight/spectral-runtime": "^1.1.0",
     "@aws-sdk/client-s3": "^3.400.0",
     "@aws-sdk/client-ses": "^3.400.0",
     "@aws-sdk/client-cloudwatch": "^3.400.0",
@@ -100,7 +96,6 @@ Create a file called `package.json` in the root of your project folder. You can 
 ```
 
 **What each dependency does:**
-- `@stoplight/spectral-core`, `spectral-rulesets`, `spectral-parsers`, `spectral-runtime` — The Spectral linting engine that validates OpenAPI specs
 - `@aws-sdk/client-s3` — AWS SDK to upload PDF reports to S3
 - `@aws-sdk/client-ses` — AWS SDK to send emails via SES
 - `@aws-sdk/client-cloudwatch` — AWS SDK to publish custom CloudWatch metrics
@@ -184,10 +179,8 @@ module.exports = {
   defaultNotifyEmail: process.env.DEFAULT_NOTIFY_EMAIL || '',
 
   validation: {
-    // Spectral ruleset to use: 'oas' for standard OpenAPI rules
-    ruleset: process.env.VALIDATION_RULESET || 'oas',
-    // Include best-practice rules in addition to spec compliance
-    includeBestPractices: process.env.INCLUDE_BEST_PRACTICES !== 'false',
+    // Validation rules are managed in SwaggerHub via Standardization (style guides)
+    // The pipeline fetches violations from the SwaggerHub Standardization API
   },
 
   report: {
@@ -529,141 +522,60 @@ module.exports = { SwaggerHubClient };
 
 ## Step 8: Create the Validation Engine
 
-This is the core linting engine. It uses Spectral (the same engine SwaggerHub uses internally) to validate OpenAPI specs.
+This engine processes the validation results returned by the SwaggerHub Standardization API (`GET /apis/{owner}/{api}/{version}/standardization`). Instead of running Spectral locally, it normalizes the API response into categorized, scored issues for the PDF report.
 
-**IMPORTANT NOTE:** Spectral's programmatic API requires actual JavaScript function references for custom rules — not string names. This is the trickiest part of the build. The `truthy` and `pattern` imports from `@stoplight/spectral-functions` are used directly as function references in the rule definitions. The `extends: [[oas, 'all']]` format (note the double brackets) is required to include all OAS rules.
+**How rules are managed:** Validation rules (Spectral rulesets / style guides) are configured in SwaggerHub under Organisation Settings → Standardization. The pipeline fetches the violations via the API — no local Spectral installation needed.
 
 **File: `src/services/validation-engine.js`**
 ```javascript
 /**
- * Validation Engine - Uses Spectral to lint OpenAPI specifications
+ * Validation Engine - Processes SwaggerHub Standardization API results
  *
- * Validates against:
- * - OpenAPI 2.0/3.x spec compliance
- * - API design best practices (naming, descriptions, response codes, etc.)
+ * Instead of running Spectral locally, this engine consumes the validation
+ * errors returned by the SwaggerHub Standardization API endpoint:
+ *   GET /apis/{owner}/{api}/{version}/standardization
+ *
+ * The engine normalizes the response into our standard format with:
+ * - Categorized issues
+ * - Severity mapping
+ * - Numeric quality score (0-100)
+ * - Summary statistics
  */
-
-const { Spectral, Document } = require('@stoplight/spectral-core');
-const Parsers = require('@stoplight/spectral-parsers');
-const { oas } = require('@stoplight/spectral-rulesets');
-const { truthy, pattern } = require('@stoplight/spectral-functions');
 
 class ValidationEngine {
   constructor(options = {}) {
-    this.includeBestPractices = options.includeBestPractices !== false;
+    // Reserved for future options
   }
 
   /**
-   * Validate an OpenAPI specification
-   * @param {string|object} apiSpec - The OpenAPI spec (JSON string or object)
+   * Process standardization results from the SwaggerHub API
+   * @param {object} standardizationData - Response from GET .../standardization
+   *   Expected shape: { errors: [{ description, line, message, ruleName, severity }] }
+   *   Or: { result: { errors: [...] } }
    * @returns {object} Validation results with categorized issues and summary
    */
-  async validate(apiSpec) {
-    const spectral = new Spectral();
+  async validate(standardizationData) {
+    // The SwaggerHub API may return errors at the top level or nested under 'result'
+    const rawErrors = standardizationData.errors
+      || standardizationData.result?.errors
+      || [];
 
-    // Build combined ruleset: standard OAS rules + optional best practice rules
-    const rulesetDefinition = {
-      extends: [[oas, 'all']],
-      rules: {},
-    };
-
-    if (this.includeBestPractices) {
-      rulesetDefinition.rules = this.getBestPracticeRules();
-    }
-
-    spectral.setRuleset(rulesetDefinition);
-
-    // Parse the spec if it's a string
-    const specString = typeof apiSpec === 'string' ? apiSpec : JSON.stringify(apiSpec);
-
-    // Create a Spectral document
-    const document = new Document(specString, Parsers.Json, 'api-spec.json');
-
-    // Run validation
-    const diagnostics = await spectral.run(document);
-
-    // Categorize and format results
-    return this.formatResults(diagnostics);
-  }
-
-  /**
-   * Best practice rules using actual Spectral function references
-   */
-  getBestPracticeRules() {
-    return {
-      'bp-path-casing': {
-        description: 'API paths should use kebab-case (e.g., /my-resource)',
-        message: 'Path should use kebab-case. Avoid camelCase or snake_case in URLs.',
-        severity: 'warn',
-        given: '$.paths',
-        then: {
-          function: pattern,
-          functionOptions: { match: '^(/[a-z0-9\\-{}]+)+$' },
-          field: '@key',
-        },
-      },
-      'bp-request-body-required': {
-        description: 'POST, PUT, and PATCH operations should define a request body',
-        message: 'Operation should have a requestBody defined.',
-        severity: 'warn',
-        given: '$.paths[*][post,put,patch]',
-        then: {
-          function: truthy,
-          field: 'requestBody',
-        },
-      },
-      'bp-response-descriptions': {
-        description: 'All API responses should have meaningful descriptions',
-        message: 'Response should have a description.',
-        severity: 'warn',
-        given: '$.paths[*][*].responses[*]',
-        then: {
-          function: truthy,
-          field: 'description',
-        },
-      },
-      'bp-parameter-descriptions': {
-        description: 'All parameters should have descriptions',
-        message: 'Parameter should have a description.',
-        severity: 'info',
-        given: '$.paths[*][*].parameters[*]',
-        then: {
-          function: truthy,
-          field: 'description',
-        },
-      },
-      'bp-tags-description': {
-        description: 'Tags should have descriptions for better documentation',
-        message: 'Tag should have a description.',
-        severity: 'info',
-        given: '$.tags[*]',
-        then: {
-          function: truthy,
-          field: 'description',
-        },
-      },
-    };
-  }
-
-  /**
-   * Format Spectral diagnostics into a structured report
-   */
-  formatResults(diagnostics) {
-    const issues = diagnostics.map((d) => ({
-      code: d.code,
-      message: d.message,
-      severity: this.mapSeverity(d.severity),
-      severityLevel: d.severity,
-      path: d.path ? d.path.join('.') : '',
-      range: d.range
+    // Normalize each standardization error into our issue format
+    const issues = rawErrors.map((err) => ({
+      code: err.ruleName || err.rule || 'standardization',
+      message: err.message || err.description || 'Standardization violation',
+      severity: this.mapSeverity(err.severity),
+      severityLevel: this.mapSeverityLevel(err.severity),
+      path: err.pointer || err.path || (err.line ? `line ${err.line}` : ''),
+      range: err.line
         ? {
-            startLine: d.range.start.line + 1,
-            startCol: d.range.start.character + 1,
-            endLine: d.range.end.line + 1,
-            endCol: d.range.end.character + 1,
+            startLine: err.line,
+            startCol: err.character || 1,
+            endLine: err.line,
+            endCol: err.character || 1,
           }
         : null,
-      category: this.categorizeIssue(d.code),
+      category: this.categorizeIssue(err.ruleName || err.rule || ''),
     }));
 
     // Sort by severity (errors first)
@@ -685,64 +597,64 @@ class ValidationEngine {
   }
 
   /**
-   * Map Spectral severity numbers to human-readable labels
-   * Spectral: 0=Error, 1=Warning, 2=Information, 3=Hint
+   * Map SwaggerHub standardization severity to human-readable label
+   * SwaggerHub StandardizationRuleSeverity: ERROR, WARN/WARNING, INFO, HINT
    */
   mapSeverity(severity) {
-    const map = {
-      0: 'Error',
-      1: 'Warning',
-      2: 'Information',
-      3: 'Hint',
-    };
-    return map[severity] || 'Unknown';
+    if (!severity) return 'Warning';
+    const s = String(severity).toUpperCase();
+    if (s === 'ERROR' || s === '0') return 'Error';
+    if (s === 'WARN' || s === 'WARNING' || s === '1') return 'Warning';
+    if (s === 'INFO' || s === 'INFORMATION' || s === '2') return 'Information';
+    if (s === 'HINT' || s === '3') return 'Hint';
+    return 'Warning';
   }
 
   /**
-   * Categorize an issue based on its rule code
+   * Map severity to numeric level (for sorting)
+   * 0=Error, 1=Warning, 2=Information, 3=Hint
    */
-  categorizeIssue(code) {
-    const categories = {
-      // Spec compliance
-      'oas2-schema': 'Spec Compliance',
-      'oas3-schema': 'Spec Compliance',
-      'oas3-valid-schema-example': 'Spec Compliance',
-      'oas2-valid-schema-example': 'Spec Compliance',
-      'oas3-valid-media-example': 'Spec Compliance',
+  mapSeverityLevel(severity) {
+    if (!severity) return 1;
+    const s = String(severity).toUpperCase();
+    if (s === 'ERROR' || s === '0') return 0;
+    if (s === 'WARN' || s === 'WARNING' || s === '1') return 1;
+    if (s === 'INFO' || s === 'INFORMATION' || s === '2') return 2;
+    if (s === 'HINT' || s === '3') return 3;
+    return 1;
+  }
 
-      // Structure
-      'info-contact': 'Documentation',
-      'info-description': 'Documentation',
-      'info-license': 'Documentation',
-      'operation-description': 'Documentation',
-      'operation-operationId': 'Structure',
-      'operation-tags': 'Structure',
-      'path-params': 'Structure',
-      'no-eval-in-markdown': 'Security',
-      'no-script-tags-in-markdown': 'Security',
+  /**
+   * Categorize an issue based on its rule name
+   */
+  categorizeIssue(ruleName) {
+    const code = String(ruleName).toLowerCase();
 
-      // Naming & Design
-      'operation-operationId-valid-in-url': 'Naming Conventions',
-      'operation-operationId-unique': 'Naming Conventions',
-      'path-keys-no-trailing-slash': 'Naming Conventions',
-      'path-not-include-query': 'Naming Conventions',
+    // Spec compliance
+    if (code.includes('schema') || code.includes('oas2-') || code.includes('oas3-')) return 'Spec Compliance';
 
-      // Responses
-      'operation-success-response': 'Response Design',
-      'oas3-api-servers': 'Server Configuration',
-      'oas2-api-host': 'Server Configuration',
-      'oas2-api-schemes': 'Server Configuration',
+    // Documentation
+    if (code.includes('description') || code.includes('contact') || code.includes('license') || code.includes('info-')) return 'Documentation';
 
-      // Best practices
-      'bp-path-casing': 'Best Practice',
-      'bp-request-body-required': 'Best Practice',
-      'bp-response-descriptions': 'Best Practice',
-      'bp-parameter-descriptions': 'Best Practice',
-      'bp-schema-properties-descriptions': 'Best Practice',
-      'bp-no-numeric-ids-in-paths': 'Best Practice',
-    };
+    // Structure
+    if (code.includes('operationid') || code.includes('operation-tags') || code.includes('path-params')) return 'Structure';
 
-    return categories[code] || 'General';
+    // Security
+    if (code.includes('security') || code.includes('eval') || code.includes('script')) return 'Security';
+
+    // Naming
+    if (code.includes('casing') || code.includes('naming') || code.includes('path-key') || code.includes('trailing-slash')) return 'Naming Conventions';
+
+    // Response design
+    if (code.includes('response') || code.includes('success-response')) return 'Response Design';
+
+    // Server config
+    if (code.includes('server') || code.includes('host') || code.includes('scheme')) return 'Server Configuration';
+
+    // Best practice
+    if (code.includes('bp-') || code.includes('best-practice')) return 'Best Practice';
+
+    return 'General';
   }
 
   /**
@@ -791,32 +703,31 @@ module.exports = { ValidationEngine };
 
 ---
 
-## Step 9: Create the Best Practices Rules Documentation File
+## Step 9: Create the Best Practices Rules Reference File
 
-This file is a documentation placeholder. The actual rules are defined inside `validation-engine.js` (Step 8) because Spectral requires actual function references.
+This file documents where validation rules are managed. Rules are now configured in SwaggerHub via the Standardization feature (style guides / Spectral rulesets).
 
 **File: `src/services/rules/best-practices.js`**
 ```javascript
 /**
- * Custom Best Practice Rules for API Design
+ * Best Practice Rules Reference
  *
- * NOTE: These rules are defined in validation-engine.js using Spectral's
- * programmatic API with actual function references.
+ * NOTE: Validation rules are now managed in SwaggerHub via the
+ * Standardization feature (style guide / Spectral rulesets).
  *
- * This file documents the custom rules applied:
+ * The validation pipeline fetches rule violations from:
+ *   GET /apis/{owner}/{api}/{version}/standardization
  *
- * bp-path-casing      - API paths should use kebab-case
- * bp-request-body-required - POST/PUT/PATCH should have request bodies
- * bp-response-descriptions - All responses need descriptions  
- * bp-parameter-descriptions - Parameters should have descriptions
- * bp-tags-description  - Tags should have descriptions
+ * To customise rules, update your organisation's style guide in
+ * SwaggerHub → Organisation Settings → Standardization, or use
+ * the Spectral Rulesets API:
+ *   GET/PUT /standardization/spectral-rulesets/{owner}/{name}/zip
  *
- * To add more rules, edit ValidationEngine.getBestPracticeRules() in
- * validation-engine.js using Spectral function imports:
- *   const { truthy, pattern, schema } = require('@stoplight/spectral-functions');
+ * The validation engine (validation-engine.js) then categorises
+ * and scores the results returned by SwaggerHub.
  */
 
-module.exports = { bestPracticeRules };
+module.exports = {};
 ```
 
 ---

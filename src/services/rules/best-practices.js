@@ -1,20 +1,19 @@
 /**
- * Custom Best Practice Rules for API Design
+ * Best Practice Rules Reference
  *
- * NOTE: These rules are defined in validation-engine.js using Spectral's
- * programmatic API with actual function references.
+ * NOTE: Validation rules are now managed in SwaggerHub via the
+ * Standardization feature (style guide / Spectral rulesets).
  *
- * This file documents the custom rules applied:
+ * The validation pipeline fetches rule violations from:
+ *   GET /apis/{owner}/{api}/{version}/standardization
  *
- * bp-path-casing      - API paths should use kebab-case
- * bp-request-body-required - POST/PUT/PATCH should have request bodies
- * bp-response-descriptions - All responses need descriptions  
- * bp-parameter-descriptions - Parameters should have descriptions
- * bp-tags-description  - Tags should have descriptions
+ * To customise rules, update your organisation's style guide in
+ * SwaggerHub → Organisation Settings → Standardization, or use
+ * the Spectral Rulesets API:
+ *   GET/PUT /standardization/spectral-rulesets/{owner}/{name}/zip
  *
- * To add more rules, edit ValidationEngine.getBestPracticeRules() in
- * validation-engine.js using Spectral function imports:
- *   const { truthy, pattern, schema } = require('@stoplight/spectral-functions');
+ * The validation engine (validation-engine.js) then categorises
+ * and scores the results returned by SwaggerHub.
  */
 
-module.exports = { bestPracticeRules };
+module.exports = {};

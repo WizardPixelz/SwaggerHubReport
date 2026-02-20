@@ -3,7 +3,10 @@
  *
  * Run with: node src/local-test.js
  *
- * Tests the full validation + report pipeline locally using a sample OpenAPI spec.
+ * Tests the full validation + report pipeline locally using mock
+ * SwaggerHub Standardization API data (since the real API requires
+ * network access and credentials).
+ *
  * The PDF report is written to ./test-output/
  */
 
@@ -13,122 +16,164 @@ const { ValidationEngine } = require('./services/validation-engine');
 const { ReportGenerator } = require('./services/report-generator');
 const { DiffEngine } = require('./services/diff-engine');
 
-// Sample OpenAPI 3.0 spec with intentional issues for testing
-const sampleSpec = {
-  openapi: '3.0.3',
-  info: {
-    title: 'Sample Pet Store API',
-    version: '1.0.0',
-    // Missing: description, contact, license
-  },
-  paths: {
-    '/pets': {
-      get: {
-        // Missing: operationId, description
-        tags: ['pets'],
-        summary: 'List all pets',
-        responses: {
-          '200': {
-            description: 'A list of pets',
-            content: {
-              'application/json': {
-                schema: {
-                  type: 'array',
-                  items: { $ref: '#/components/schemas/Pet' },
-                },
-              },
-            },
-          },
-          // Missing: error responses
-        },
-      },
-      post: {
-        summary: 'Create a pet',
-        tags: ['pets'],
-        operationId: 'createPet',
-        // Missing: requestBody (best practice violation)
-        responses: {
-          '201': {
-            description: 'Pet created',
-          },
-        },
-      },
+/**
+ * Mock SwaggerHub Standardization API response
+ * Simulates what GET /apis/{owner}/{api}/{version}/standardization returns
+ * for a Pet Store API with intentional style-guide violations.
+ */
+const mockStandardizationResponse = {
+  errors: [
+    {
+      ruleName: 'info-contact',
+      message: 'Info object must have "contact" object.',
+      severity: 'WARN',
+      line: 3,
+      pointer: 'info',
     },
-    '/pets/{petId}': {
-      get: {
-        summary: 'Get a pet by ID',
-        operationId: 'getPetById',
-        tags: ['pets'],
-        parameters: [
-          {
-            name: 'petId',
-            in: 'path',
-            required: true,
-            schema: { type: 'string' },
-            // Missing: description
-          },
-        ],
-        responses: {
-          '200': {
-            description: 'A single pet',
-            content: {
-              'application/json': {
-                schema: { $ref: '#/components/schemas/Pet' },
-              },
-            },
-          },
-          '404': {
-            description: 'Pet not found',
-          },
-        },
-      },
+    {
+      ruleName: 'info-description',
+      message: 'Info "description" must be present and non-empty string.',
+      severity: 'WARN',
+      line: 3,
+      pointer: 'info',
     },
-    // Naming violation: camelCase path
-    '/petCategories': {
-      get: {
-        summary: 'List categories',
-        operationId: 'listCategories',
-        tags: ['categories'],
-        responses: {
-          '200': {
-            description: 'A list of categories',
-          },
-        },
-      },
+    {
+      ruleName: 'info-license',
+      message: 'Info object must have "license" object.',
+      severity: 'WARN',
+      line: 3,
+      pointer: 'info',
     },
-  },
-  components: {
-    schemas: {
-      Pet: {
-        type: 'object',
-        required: ['id', 'name'],
-        properties: {
-          id: {
-            type: 'integer',
-            format: 'int64',
-            // Missing: description
-          },
-          name: {
-            type: 'string',
-            // Missing: description
-          },
-          tag: {
-            type: 'string',
-          },
-        },
-      },
+    {
+      ruleName: 'oas3-api-servers',
+      message: 'OpenAPI "servers" must be present and non-empty array.',
+      severity: 'WARN',
+      line: 1,
+      pointer: '',
     },
-  },
-  // Missing: servers
+    {
+      ruleName: 'operation-description',
+      message: 'Operation "description" must be present and non-empty string.',
+      severity: 'WARN',
+      line: 10,
+      pointer: 'paths./pets.get',
+    },
+    {
+      ruleName: 'operation-operationId',
+      message: 'Operation must have "operationId".',
+      severity: 'WARN',
+      line: 10,
+      pointer: 'paths./pets.get',
+    },
+    {
+      ruleName: 'operation-description',
+      message: 'Operation "description" must be present and non-empty string.',
+      severity: 'WARN',
+      line: 32,
+      pointer: 'paths./pets.post',
+    },
+    {
+      ruleName: 'operation-description',
+      message: 'Operation "description" must be present and non-empty string.',
+      severity: 'WARN',
+      line: 48,
+      pointer: 'paths./pets/{petId}.get',
+    },
+    {
+      ruleName: 'bp-path-casing',
+      message: 'Path should use kebab-case. Avoid camelCase or snake_case in URLs.',
+      severity: 'WARN',
+      line: 70,
+      pointer: 'paths./petCategories',
+    },
+    {
+      ruleName: 'operation-tags',
+      message: 'Operation must have non-empty "tags" array.',
+      severity: 'WARN',
+      line: 70,
+      pointer: 'paths./petCategories.get',
+    },
+    {
+      ruleName: 'bp-parameter-descriptions',
+      message: 'Parameter should have a description.',
+      severity: 'INFO',
+      line: 55,
+      pointer: 'paths./pets/{petId}.get.parameters.0',
+    },
+    {
+      ruleName: 'bp-response-descriptions',
+      message: 'Response should have a meaningful description.',
+      severity: 'INFO',
+      line: 38,
+      pointer: 'paths./pets.post.responses.201',
+    },
+    {
+      ruleName: 'bp-tags-description',
+      message: 'Tag should have a description.',
+      severity: 'INFO',
+      line: 0,
+      pointer: 'tags.0',
+    },
+    {
+      ruleName: 'bp-tags-description',
+      message: 'Tag should have a description.',
+      severity: 'INFO',
+      line: 0,
+      pointer: 'tags.1',
+    },
+    {
+      ruleName: 'oas3-schema',
+      message: 'Property "id" should have a description.',
+      severity: 'INFO',
+      line: 85,
+      pointer: 'components.schemas.Pet.properties.id',
+    },
+    {
+      ruleName: 'oas3-schema',
+      message: 'Property "name" should have a description.',
+      severity: 'INFO',
+      line: 89,
+      pointer: 'components.schemas.Pet.properties.name',
+    },
+    {
+      ruleName: 'oas3-schema',
+      message: 'Property "tag" should have a description.',
+      severity: 'INFO',
+      line: 92,
+      pointer: 'components.schemas.Pet.properties.tag',
+    },
+    {
+      ruleName: 'operation-success-response',
+      message: 'Operation must define at least one 2xx or 3xx response.',
+      severity: 'WARN',
+      line: 70,
+      pointer: 'paths./petCategories.get.responses',
+    },
+    {
+      ruleName: 'bp-request-body-required',
+      message: 'POST operation should have a requestBody defined.',
+      severity: 'WARN',
+      line: 32,
+      pointer: 'paths./pets.post',
+    },
+    {
+      ruleName: 'no-eval-in-markdown',
+      message: 'Markdown descriptions should not contain "eval(" expressions.',
+      severity: 'ERROR',
+      line: 5,
+      pointer: 'info.description',
+    },
+  ],
 };
 
 async function main() {
   console.log('=== SwaggerHub Validation Report - Local Test ===\n');
+  console.log('   Using mock SwaggerHub Standardization API data\n');
 
-  // Step 1: Validate
-  console.log('1. Running validation...');
-  const engine = new ValidationEngine({ includeBestPractices: true });
-  const results = await engine.validate(sampleSpec);
+  // Step 1: Process mock standardization results through validation engine
+  console.log('1. Processing standardization results...');
+  const engine = new ValidationEngine();
+  const results = await engine.validate(mockStandardizationResponse);
 
   console.log(`\n   Score: ${results.summary.score}/100`);
   console.log(`   Passed: ${results.summary.passedValidation}`);
