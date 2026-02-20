@@ -11,6 +11,7 @@ const fs = require('fs');
 const path = require('path');
 const { ValidationEngine } = require('./services/validation-engine');
 const { ReportGenerator } = require('./services/report-generator');
+const { DiffEngine } = require('./services/diff-engine');
 
 // Sample OpenAPI 3.0 spec with intentional issues for testing
 const sampleSpec = {
@@ -143,18 +144,108 @@ async function main() {
     if (issue.path) console.log(`      Path: ${issue.path}`);
   });
 
-  // Step 2: Generate PDF report
-  console.log('\n2. Generating PDF report...');
+  // Step 2: Simulate a previous scan for diff comparison
+  console.log('\n2. Simulating previous scan (with more issues)...');
+  const previousScan = {
+    version: '0.9.0',
+    scannedAt: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString(), // 1 week ago
+    summary: {
+      totalIssues: 25,
+      errors: 2,
+      warnings: 12,
+      info: 8,
+      hints: 3,
+      passedValidation: false,
+      score: 30,
+      categories: {
+        Documentation: { count: 5, errors: 0, warnings: 3 },
+        'Best Practice': { count: 6, errors: 0, warnings: 4 },
+        Structure: { count: 4, errors: 1, warnings: 2 },
+        Security: { count: 2, errors: 1, warnings: 1 },
+        'Naming Conventions': { count: 3, errors: 0, warnings: 2 },
+        General: { count: 5, errors: 0, warnings: 0 },
+      },
+    },
+    issues: [
+      // Some issues that will still be present (persisting)
+      ...results.issues.slice(0, 10).map((i) => ({ ...i })),
+      // Some issues that got resolved (won't be in current)
+      {
+        code: 'oas3-schema',
+        message: 'Schema object "Pet" has an invalid "type" value',
+        severity: 'Error',
+        severityLevel: 0,
+        path: 'components.schemas.Pet.type',
+        category: 'Spec Compliance',
+      },
+      {
+        code: 'no-script-tags-in-markdown',
+        message: 'Description contains script tags',
+        severity: 'Error',
+        severityLevel: 0,
+        path: 'info.description',
+        category: 'Security',
+      },
+      {
+        code: 'bp-path-casing',
+        message: 'Path should use kebab-case. Avoid camelCase or snake_case in URLs.',
+        severity: 'Warning',
+        severityLevel: 1,
+        path: 'paths./userAccounts',
+        category: 'Best Practice',
+      },
+      {
+        code: 'operation-description',
+        message: 'Operation "description" must be present and non-empty string.',
+        severity: 'Warning',
+        severityLevel: 1,
+        path: 'paths./users.get',
+        category: 'Documentation',
+      },
+      {
+        code: 'operation-description',
+        message: 'Operation "description" must be present and non-empty string.',
+        severity: 'Warning',
+        severityLevel: 1,
+        path: 'paths./users.post',
+        category: 'Documentation',
+      },
+    ],
+  };
+
+  // Run diff
+  console.log('   Computing diff...');
+  const diffEngine = new DiffEngine();
+  const diff = diffEngine.compare(results, previousScan);
+
+  console.log(`\n   Diff Results:`);
+  console.log(`   - Previous score: ${diff.previousScore} → Current score: ${diff.currentScore} (${diff.scoreChange > 0 ? '+' : ''}${diff.scoreChange})`);
+  console.log(`   - Resolved issues: ${diff.resolvedIssues.length}`);
+  console.log(`   - New issues: ${diff.newIssues.length}`);
+  console.log(`   - Persisting issues: ${diff.persistingIssues.length}`);
+
+  if (diff.resolvedIssues.length > 0) {
+    console.log('\n   Resolved:');
+    diff.resolvedIssues.forEach((i) => console.log(`     ✓ [${i.severity}] ${i.message}`));
+  }
+  if (diff.newIssues.length > 0) {
+    console.log('\n   New:');
+    diff.newIssues.forEach((i) => console.log(`     ● [${i.severity}] ${i.message}`));
+  }
+
+  // Step 3: Generate PDF report with diff
+  console.log('\n3. Generating PDF report (with diff section)...');
   const reportGen = new ReportGenerator();
   const pdfBuffer = await reportGen.generate({
     apiName: 'Sample Pet Store API',
     apiVersion: '1.0.0',
     owner: 'test-organization',
     validationResults: results,
+    diff,
     generatedAt: new Date().toISOString(),
   });
 
-  // Step 3: Write to file
+  // Step 4: Write to file
   const outputDir = path.join(__dirname, '..', 'test-output');
   if (!fs.existsSync(outputDir)) {
     fs.mkdirSync(outputDir, { recursive: true });

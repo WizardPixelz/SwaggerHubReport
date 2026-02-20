@@ -14,13 +14,16 @@ flowchart TD
         E --> F["Fetch full spec from SwaggerHub API"]
         F --> G["Spectral Validation Engine"]
         G --> H["Calculate quality score (0-100)"]
-        H --> I["Generate PDF Report (PDFKit)"]
+        H --> H2["Load previous scan from S3"]
+        H2 --> H3["Diff Engine: compare current vs previous"]
+        H3 --> H4["Save current scan to S3"]
+        H4 --> I["Generate PDF Report (PDFKit)\nIncludes: Changes Since Last Scan page"]
         I --> J["Upload PDF to S3"]
         I --> K["Send email via SES"]
     end
 
     subgraph R["Recipient"]
-        L["Receives email with:\n• Score & summary\n• PDF attachment\n• S3 download link"]
+        L["Receives email with:\n• Score change (+/-)\n• Resolved & new issues\n• PDF attachment\n• S3 download link"]
     end
 
     B --> C
@@ -31,4 +34,5 @@ flowchart TD
     style AWS fill:#1a1a2e,stroke:#f59e0b,color:#fff
     style R fill:#e3f2fd,stroke:#1565c0
     style D fill:#ff9800,stroke:#e65100,color:#fff
+    style H3 fill:#7c3aed,stroke:#5b21b6,color:#fff
 ```

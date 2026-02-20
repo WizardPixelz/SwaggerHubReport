@@ -1,10 +1,12 @@
 # SwaggerHub Validation Report — Complete Build Guide
 
-**What you're building:** An automated pipeline where SwaggerHub sends a webhook whenever someone creates or updates an API. That webhook triggers an AWS Lambda function that fetches the spec, validates it against OpenAPI standards and best practices, generates a professional PDF report, stores it in S3, and emails it to the submitter.
+**What you're building:** An automated pipeline where SwaggerHub sends a webhook whenever someone creates or updates an API. That webhook triggers an AWS Lambda function that fetches the spec, validates it against OpenAPI standards and best practices, generates a professional PDF report with an incremental diff showing what changed since the last scan, stores it in S3, and emails it to the submitter.
 
 **Architecture:**
 ```
 SwaggerHub (webhook) → API Gateway (POST /webhook) → Lambda → Spectral Validation
+                                                          ↓
+                                                   Diff vs Previous Scan (S3)
                                                           ↓
                                                     PDF Report (PDFKit)
                                                     ↓              ↓
@@ -196,7 +198,7 @@ module.exports = {
 
 ## Step 6: Create the Lambda Handler (Main Entry Point)
 
-This is the main file that runs when the Lambda is triggered. It orchestrates the entire pipeline.
+This is the main file that runs when the Lambda is triggered. It orchestrates the entire pipeline, including comparing against the previous scan to produce an incremental diff.
 
 **File: `src/handler.js`**
 ```javascript
@@ -212,6 +214,8 @@ const { ValidationEngine } = require('./services/validation-engine');
 const { ReportGenerator } = require('./services/report-generator');
 const { S3Service } = require('./services/s3-service');
 const { EmailService } = require('./services/email-service');
+const { ScanHistoryService } = require('./services/scan-history-service');
+const { DiffEngine } = require('./services/diff-engine');
 const config = require('./config');
 
 /**
@@ -239,19 +243,48 @@ exports.handler = async (event) => {
     const validationResults = await validationEngine.validate(apiSpec);
     console.log(`Validation complete: ${validationResults.summary.totalIssues} issues found`);
 
-    // 4. Generate PDF report
+    // 3b. Compare against previous scan (incremental diff)
+    const s3Service = new S3Service(config.aws);
+    const scanHistoryService = new ScanHistoryService(config.aws);
+    const diffEngine = new DiffEngine();
+
+    let diff = null;
+    try {
+      const previousScan = await scanHistoryService.getPreviousScan(
+        webhookPayload.owner,
+        webhookPayload.apiName
+      );
+      diff = diffEngine.compare(validationResults, previousScan);
+      console.log(`Diff: ${diff.resolvedIssues.length} resolved, ${diff.newIssues.length} new, score ${diff.scoreChange > 0 ? '+' : ''}${diff.scoreChange}`);
+    } catch (error) {
+      console.warn('Could not compute diff (continuing without it):', error.message);
+    }
+
+    // 3c. Save current scan for future comparisons
+    try {
+      await scanHistoryService.saveCurrentScan(
+        webhookPayload.owner,
+        webhookPayload.apiName,
+        webhookPayload.version,
+        validationResults
+      );
+    } catch (error) {
+      console.warn('Could not save scan history (non-blocking):', error.message);
+    }
+
+    // 4. Generate PDF report (with diff if available)
     const reportGenerator = new ReportGenerator();
     const pdfBuffer = await reportGenerator.generate({
       apiName: webhookPayload.apiName,
       apiVersion: webhookPayload.version,
       owner: webhookPayload.owner,
       validationResults,
+      diff,
       generatedAt: new Date().toISOString(),
     });
     console.log('PDF report generated');
 
     // 5. Upload report to S3
-    const s3Service = new S3Service(config.aws);
     const reportKey = `reports/${webhookPayload.owner}/${webhookPayload.apiName}/${webhookPayload.version}/validation-report-${Date.now()}.pdf`;
     const reportUrl = await s3Service.uploadReport(reportKey, pdfBuffer);
     console.log(`Report uploaded to S3: ${reportUrl}`);
@@ -266,6 +299,7 @@ exports.handler = async (event) => {
       reportUrl,
       pdfBuffer,
       validationSummary: validationResults.summary,
+      diff,
     });
     console.log('Email sent successfully');
 
@@ -727,6 +761,241 @@ module.exports = { bestPracticeRules };
 
 ---
 
+## Step 9a: Create the Scan History Service
+
+This service stores and retrieves previous validation results from S3 so we can compare scans and show what changed. Each API's latest scan is saved as a JSON file at `scan-history/{owner}/{apiName}/latest.json`.
+
+**File: `src/services/scan-history-service.js`**
+```javascript
+/**
+ * Scan History Service - Stores and retrieves previous validation results
+ *
+ * Uses S3 to persist the last scan result for each API so the diff engine
+ * can compare current vs previous runs and show what changed.
+ *
+ * Storage path: scan-history/{owner}/{apiName}/latest.json
+ */
+
+const { S3Client, PutObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
+
+class ScanHistoryService {
+  constructor(awsConfig) {
+    this.s3 = new S3Client({ region: awsConfig.region });
+    this.bucket = awsConfig.s3Bucket;
+  }
+
+  /**
+   * Get the S3 key for an API's scan history
+   */
+  _historyKey(owner, apiName) {
+    return `scan-history/${owner}/${apiName}/latest.json`;
+  }
+
+  /**
+   * Retrieve the previous scan results for an API
+   * @param {string} owner - API owner
+   * @param {string} apiName - API name
+   * @returns {object|null} Previous scan data, or null if no history exists
+   */
+  async getPreviousScan(owner, apiName) {
+    try {
+      const command = new GetObjectCommand({
+        Bucket: this.bucket,
+        Key: this._historyKey(owner, apiName),
+      });
+
+      const response = await this.s3.send(command);
+      const bodyString = await response.Body.transformToString('utf-8');
+      return JSON.parse(bodyString);
+    } catch (error) {
+      if (error.name === 'NoSuchKey' || error.$metadata?.httpStatusCode === 404) {
+        console.log(`No previous scan found for ${owner}/${apiName} (first scan)`);
+        return null;
+      }
+      console.warn(`Error retrieving scan history for ${owner}/${apiName}:`, error.message);
+      return null;
+    }
+  }
+
+  /**
+   * Save the current scan results as the latest for future comparison
+   * @param {string} owner - API owner
+   * @param {string} apiName - API name
+   * @param {string} version - API version
+   * @param {object} validationResults - The full validation results object
+   */
+  async saveCurrentScan(owner, apiName, version, validationResults) {
+    const scanData = {
+      owner,
+      apiName,
+      version,
+      scannedAt: new Date().toISOString(),
+      summary: validationResults.summary,
+      issues: validationResults.issues,
+    };
+
+    const command = new PutObjectCommand({
+      Bucket: this.bucket,
+      Key: this._historyKey(owner, apiName),
+      Body: JSON.stringify(scanData, null, 2),
+      ContentType: 'application/json',
+      Metadata: {
+        'generated-by': 'swaggerhub-validation-report',
+        'scan-version': version,
+        'scanned-at': scanData.scannedAt,
+      },
+    });
+
+    await this.s3.send(command);
+    console.log(`Scan history saved for ${owner}/${apiName}@${version}`);
+  }
+}
+
+module.exports = { ScanHistoryService };
+```
+
+**How it works:**
+- On each validation run, the handler calls `getPreviousScan()` to load the last scan (returns `null` on first run)
+- After validation, `saveCurrentScan()` overwrites the `latest.json` so the next run has a baseline
+- Uses the same S3 bucket as PDF reports — no additional infrastructure needed
+
+---
+
+## Step 9b: Create the Diff Engine
+
+This compares the current validation results against the previous scan and produces a structured diff showing what was fixed, what's new, and how the score changed.
+
+**File: `src/services/diff-engine.js`**
+```javascript
+/**
+ * Diff Engine - Compares current validation results against a previous scan
+ *
+ * Produces a structured diff showing:
+ * - New issues introduced since the last scan
+ * - Issues resolved since the last scan
+ * - Score change (delta)
+ * - Summary comparison
+ */
+
+class DiffEngine {
+  /**
+   * Compare current validation results against a previous scan
+   * @param {object} currentResults - Current validation results (from ValidationEngine)
+   * @param {object} previousScan - Previous scan data (from ScanHistoryService), or null
+   * @returns {object} Diff report
+   */
+  compare(currentResults, previousScan) {
+    // If there's no previous scan, this is the first run
+    if (!previousScan) {
+      return {
+        isFirstScan: true,
+        previousVersion: null,
+        previousScannedAt: null,
+        scoreChange: 0,
+        previousScore: null,
+        currentScore: currentResults.summary.score,
+        newIssues: [],
+        resolvedIssues: [],
+        persistingIssues: [],
+        summaryDelta: {
+          totalIssues: 0,
+          errors: 0,
+          warnings: 0,
+          info: 0,
+        },
+      };
+    }
+
+    const prevIssues = previousScan.issues || [];
+    const currIssues = currentResults.issues || [];
+    const prevSummary = previousScan.summary || {};
+    const currSummary = currentResults.summary || {};
+
+    // Build fingerprints for matching issues
+    // An issue is "the same" if it has the same rule code + path
+    const prevFingerprints = new Map();
+    prevIssues.forEach((issue) => {
+      const fp = this._fingerprint(issue);
+      prevFingerprints.set(fp, issue);
+    });
+
+    const currFingerprints = new Map();
+    currIssues.forEach((issue) => {
+      const fp = this._fingerprint(issue);
+      currFingerprints.set(fp, issue);
+    });
+
+    // New issues: in current but not in previous
+    const newIssues = [];
+    currIssues.forEach((issue) => {
+      const fp = this._fingerprint(issue);
+      if (!prevFingerprints.has(fp)) {
+        newIssues.push(issue);
+      }
+    });
+
+    // Resolved issues: in previous but not in current
+    const resolvedIssues = [];
+    prevIssues.forEach((issue) => {
+      const fp = this._fingerprint(issue);
+      if (!currFingerprints.has(fp)) {
+        resolvedIssues.push(issue);
+      }
+    });
+
+    // Persisting issues: in both
+    const persistingIssues = [];
+    currIssues.forEach((issue) => {
+      const fp = this._fingerprint(issue);
+      if (prevFingerprints.has(fp)) {
+        persistingIssues.push(issue);
+      }
+    });
+
+    const previousScore = prevSummary.score != null ? prevSummary.score : null;
+    const currentScore = currSummary.score;
+    const scoreChange = previousScore != null ? currentScore - previousScore : 0;
+
+    return {
+      isFirstScan: false,
+      previousVersion: previousScan.version || 'unknown',
+      previousScannedAt: previousScan.scannedAt || null,
+      scoreChange,
+      previousScore,
+      currentScore,
+      newIssues,
+      resolvedIssues,
+      persistingIssues,
+      summaryDelta: {
+        totalIssues: currSummary.totalIssues - (prevSummary.totalIssues || 0),
+        errors: currSummary.errors - (prevSummary.errors || 0),
+        warnings: currSummary.warnings - (prevSummary.warnings || 0),
+        info: currSummary.info - (prevSummary.info || 0),
+      },
+    };
+  }
+
+  /**
+   * Create a fingerprint for an issue to identify it across scans.
+   * Uses rule code + path as the identity (message can change slightly).
+   */
+  _fingerprint(issue) {
+    return `${issue.code || ''}::${issue.path || ''}`;
+  }
+}
+
+module.exports = { DiffEngine };
+```
+
+**How fingerprinting works:**
+- Each issue is identified by its `rule code` + `path` (e.g., `info-contact::info` or `bp-path-casing::paths./petCategories`)
+- If the same fingerprint exists in both scans → issue persists
+- If it's only in the current scan → new issue
+- If it's only in the previous scan → resolved issue
+- This approach is robust even when messages change slightly between versions
+
+---
+
 ## Step 10: Create the PDF Report Generator
 
 This is the largest file. It uses PDFKit to create a multi-page PDF with a cover page, executive summary, detailed findings, category analysis, and recommendations.
@@ -789,6 +1058,9 @@ class ReportGenerator {
         // Build the report pages
         this.addCoverPage(doc, data);
         this.addExecutiveSummary(doc, data);
+        if (data.diff && !data.diff.isFirstScan) {
+          this.addChangesSinceLastScan(doc, data);
+        }
         this.addDetailedFindings(doc, data);
         this.addCategorySummary(doc, data);
         this.addRecommendations(doc, data);
@@ -1194,6 +1466,195 @@ class ReportGenerator {
           'For questions or to request exceptions, contact the API Governance team.',
         { align: 'center', lineGap: 3 }
       );
+  }
+
+  /**
+   * Changes Since Last Scan Page — incremental diff section
+   * Only included when diff data is available (not the first scan)
+   */
+  addChangesSinceLastScan(doc, data) {
+    doc.addPage();
+    this.addSectionHeader(doc, 'Changes Since Last Scan');
+    doc.moveDown(1);
+
+    const diff = data.diff;
+
+    // Previous scan info
+    doc
+      .font('Helvetica')
+      .fontSize(10)
+      .fillColor(this.colors.secondary)
+      .text(`Compared against: version ${diff.previousVersion} (scanned ${new Date(diff.previousScannedAt).toLocaleDateString()})`);
+    doc.moveDown(1);
+
+    // Score change banner
+    const scoreChangeColor = diff.scoreChange > 0 ? this.colors.success
+      : diff.scoreChange < 0 ? this.colors.error
+      : this.colors.secondary;
+    const scoreArrow = diff.scoreChange > 0 ? '▲' : diff.scoreChange < 0 ? '▼' : '—';
+    const scoreSign = diff.scoreChange > 0 ? '+' : '';
+
+    // Score comparison boxes
+    const boxY = doc.y;
+    // Previous score box
+    doc.roundedRect(55, boxY, 140, 60, 5).fill(this.colors.lightGray);
+    doc
+      .font('Helvetica-Bold')
+      .fontSize(24)
+      .fillColor(this.colors.secondary)
+      .text(String(diff.previousScore), 60, boxY + 8, { width: 130, align: 'center' });
+    doc
+      .font('Helvetica')
+      .fontSize(9)
+      .fillColor(this.colors.secondary)
+      .text('Previous Score', 60, boxY + 38, { width: 130, align: 'center' });
+
+    // Arrow
+    doc
+      .font('Helvetica-Bold')
+      .fontSize(20)
+      .fillColor(scoreChangeColor)
+      .text('→', 210, boxY + 12, { width: 40, align: 'center' });
+
+    // Current score box
+    const currentScoreColor = diff.currentScore >= 80 ? this.colors.success
+      : diff.currentScore >= 50 ? this.colors.warning
+      : this.colors.error;
+    doc.roundedRect(260, boxY, 140, 60, 5).fill(this.colors.lightGray);
+    doc
+      .font('Helvetica-Bold')
+      .fontSize(24)
+      .fillColor(currentScoreColor)
+      .text(String(diff.currentScore), 265, boxY + 8, { width: 130, align: 'center' });
+    doc
+      .font('Helvetica')
+      .fontSize(9)
+      .fillColor(this.colors.secondary)
+      .text('Current Score', 265, boxY + 38, { width: 130, align: 'center' });
+
+    // Delta badge
+    doc.roundedRect(420, boxY + 10, 100, 40, 5).fill(scoreChangeColor);
+    doc
+      .font('Helvetica-Bold')
+      .fontSize(16)
+      .fillColor(this.colors.white)
+      .text(`${scoreArrow} ${scoreSign}${diff.scoreChange}`, 425, boxY + 18, { width: 90, align: 'center' });
+
+    doc.y = boxY + 75;
+
+    // Summary deltas
+    doc.moveDown(0.5);
+    this.addSubHeader(doc, 'Issue Count Changes');
+    doc.moveDown(0.3);
+    const deltas = diff.summaryDelta;
+    const deltaItems = [
+      { label: 'Total Issues', value: deltas.totalIssues },
+      { label: 'Errors', value: deltas.errors },
+      { label: 'Warnings', value: deltas.warnings },
+      { label: 'Informational', value: deltas.info },
+    ];
+    deltaItems.forEach((item) => {
+      const sign = item.value > 0 ? '+' : '';
+      const color = item.value > 0 ? this.colors.error
+        : item.value < 0 ? this.colors.success
+        : this.colors.secondary;
+      doc
+        .font('Helvetica')
+        .fontSize(10)
+        .fillColor(this.colors.black)
+        .text(`${item.label}: `, 60, doc.y, { continued: true })
+        .font('Helvetica-Bold')
+        .fillColor(color)
+        .text(`${sign}${item.value}`);
+    });
+
+    // Resolved issues (green — good news)
+    if (diff.resolvedIssues.length > 0) {
+      doc.moveDown(1);
+      this.addSubHeader(doc, `Resolved Issues (${diff.resolvedIssues.length})`);
+      doc.moveDown(0.3);
+
+      diff.resolvedIssues.slice(0, 15).forEach((issue) => {
+        if (doc.y > 720) doc.addPage();
+        doc
+          .font('Helvetica')
+          .fontSize(9)
+          .fillColor(this.colors.success)
+          .text('  ✓ ', 60, doc.y, { continued: true })
+          .fillColor(this.colors.black)
+          .text(`[${issue.severity}] ${issue.message}`, { width: 450 });
+        if (issue.path) {
+          doc
+            .font('Helvetica')
+            .fontSize(8)
+            .fillColor(this.colors.info)
+            .text(`    Path: ${issue.path}`, 60);
+        }
+      });
+      if (diff.resolvedIssues.length > 15) {
+        doc
+          .font('Helvetica')
+          .fontSize(9)
+          .fillColor(this.colors.secondary)
+          .text(`  ... and ${diff.resolvedIssues.length - 15} more resolved`, 60);
+      }
+    }
+
+    // New issues (red — needs attention)
+    if (diff.newIssues.length > 0) {
+      doc.moveDown(1);
+      this.addSubHeader(doc, `New Issues Introduced (${diff.newIssues.length})`);
+      doc.moveDown(0.3);
+
+      diff.newIssues.slice(0, 15).forEach((issue) => {
+        if (doc.y > 720) doc.addPage();
+        const sevColor = this.getSeverityColor(issue.severity);
+        doc
+          .font('Helvetica')
+          .fontSize(9)
+          .fillColor(sevColor)
+          .text('  ● ', 60, doc.y, { continued: true })
+          .fillColor(this.colors.black)
+          .text(`[${issue.severity}] ${issue.message}`, { width: 450 });
+        if (issue.path) {
+          doc
+            .font('Helvetica')
+            .fontSize(8)
+            .fillColor(this.colors.info)
+            .text(`    Path: ${issue.path}`, 60);
+        }
+      });
+      if (diff.newIssues.length > 15) {
+        doc
+          .font('Helvetica')
+          .fontSize(9)
+          .fillColor(this.colors.secondary)
+          .text(`  ... and ${diff.newIssues.length - 15} more new issues`, 60);
+      }
+    }
+
+    // Persisting issues count
+    if (diff.persistingIssues.length > 0) {
+      doc.moveDown(1);
+      doc
+        .font('Helvetica')
+        .fontSize(10)
+        .fillColor(this.colors.secondary)
+        .text(`${diff.persistingIssues.length} issue(s) remain unchanged from the previous scan.`, 60);
+    }
+
+    // Net result summary
+    doc.moveDown(1.5);
+    const netText = diff.scoreChange > 0
+      ? `Overall improvement: score increased by ${diff.scoreChange} point(s).`
+      : diff.scoreChange < 0
+        ? `Quality decreased: score dropped by ${Math.abs(diff.scoreChange)} point(s). Please review new issues above.`
+        : 'No change in overall quality score since the last scan.';
+    doc
+      .font('Helvetica-Bold')
+      .fontSize(11)
+      .fillColor(scoreChangeColor)
+      .text(netText, { align: 'center' });
   }
 
   // ===================== HELPERS =====================
@@ -2343,9 +2804,11 @@ SwaggerHubReport/
 │   ├── handler.js
 │   ├── local-test.js
 │   └── services/
+│       ├── diff-engine.js
 │       ├── email-service.js
 │       ├── report-generator.js
 │       ├── s3-service.js
+│       ├── scan-history-service.js
 │       ├── swaggerhub-client.js
 │       ├── validation-engine.js
 │       └── rules/
@@ -2358,4 +2821,4 @@ SwaggerHubReport/
         └── swaggerhub-validation-stack.js
 ```
 
-Total: **14 files** you create manually, plus `node_modules/` and `package-lock.json` are generated by `npm install`.
+Total: **16 files** you create manually, plus `node_modules/` and `package-lock.json` are generated by `npm install`.

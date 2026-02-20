@@ -129,6 +129,21 @@ class EmailService {
         <span class="score-badge">Quality Score: ${s.score}/100</span>
       </div>
 
+      ${params.diff && !params.diff.isFirstScan ? `
+      <div style="background: #f0f9ff; border: 1px solid #bae6fd; border-radius: 6px; padding: 15px; margin: 15px 0;">
+        <h3 style="margin: 0 0 10px; font-size: 14px; color: #0369a1;">Changes Since Last Scan</h3>
+        <p style="margin: 3px 0; font-size: 13px; color: #374151;">
+          <strong>Score:</strong> ${params.diff.previousScore} → ${params.diff.currentScore}
+          <span style="color: ${params.diff.scoreChange > 0 ? '#16a34a' : params.diff.scoreChange < 0 ? '#dc2626' : '#6b7280'}; font-weight: bold;">
+            (${params.diff.scoreChange > 0 ? '+' : ''}${params.diff.scoreChange})
+          </span>
+        </p>
+        <p style="margin: 3px 0; font-size: 13px; color: #16a34a;">✓ ${params.diff.resolvedIssues.length} issue(s) resolved</p>
+        <p style="margin: 3px 0; font-size: 13px; color: #dc2626;">● ${params.diff.newIssues.length} new issue(s) introduced</p>
+        <p style="margin: 3px 0; font-size: 13px; color: #6b7280;">${params.diff.persistingIssues.length} issue(s) unchanged</p>
+        <p style="margin: 8px 0 0; font-size: 11px; color: #9ca3af;">Compared to version ${params.diff.previousVersion} (${new Date(params.diff.previousScannedAt).toLocaleDateString()})</p>
+      </div>` : ''}
+
       <!-- Stats Grid -->
       <table>
         <tr>
@@ -207,7 +222,7 @@ class EmailService {
     const { apiName, apiVersion, owner, reportUrl, validationSummary } = params;
     const s = validationSummary;
 
-    return [
+    const lines = [
       `API VALIDATION REPORT`,
       `====================`,
       ``,
@@ -224,6 +239,22 @@ class EmailService {
       `  Warnings: ${s.warnings}`,
       `  Info:     ${s.info}`,
       `  Hints:    ${s.hints}`,
+    ];
+
+    if (params.diff && !params.diff.isFirstScan) {
+      lines.push(
+        ``,
+        `CHANGES SINCE LAST SCAN`,
+        `-----------------------`,
+        `Previous version: ${params.diff.previousVersion}`,
+        `Score: ${params.diff.previousScore} → ${params.diff.currentScore} (${params.diff.scoreChange > 0 ? '+' : ''}${params.diff.scoreChange})`,
+        `Resolved: ${params.diff.resolvedIssues.length} issue(s)`,
+        `New:      ${params.diff.newIssues.length} issue(s)`,
+        `Unchanged: ${params.diff.persistingIssues.length} issue(s)`,
+      );
+    }
+
+    lines.push(
       ``,
       `Download the full PDF report: ${reportUrl}`,
       ``,
@@ -231,7 +262,9 @@ class EmailService {
       ``,
       `---`,
       `Automated API Governance Validation`,
-    ].join('\n');
+    );
+
+    return lines.join('\n');
   }
 
   /**

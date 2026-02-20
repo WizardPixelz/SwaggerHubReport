@@ -52,6 +52,9 @@ class ReportGenerator {
         // Build the report pages
         this.addCoverPage(doc, data);
         this.addExecutiveSummary(doc, data);
+        if (data.diff && !data.diff.isFirstScan) {
+          this.addChangesSinceLastScan(doc, data);
+        }
         this.addDetailedFindings(doc, data);
         this.addCategorySummary(doc, data);
         this.addRecommendations(doc, data);
@@ -457,6 +460,194 @@ class ReportGenerator {
           'For questions or to request exceptions, contact the API Governance team.',
         { align: 'center', lineGap: 3 }
       );
+  }
+
+  /**
+   * Changes Since Last Scan Page — incremental diff section
+   */
+  addChangesSinceLastScan(doc, data) {
+    doc.addPage();
+    this.addSectionHeader(doc, 'Changes Since Last Scan');
+    doc.moveDown(1);
+
+    const diff = data.diff;
+
+    // Previous scan info
+    doc
+      .font('Helvetica')
+      .fontSize(10)
+      .fillColor(this.colors.secondary)
+      .text(`Compared against: version ${diff.previousVersion} (scanned ${new Date(diff.previousScannedAt).toLocaleDateString()})`);
+    doc.moveDown(1);
+
+    // Score change banner
+    const scoreChangeColor = diff.scoreChange > 0 ? this.colors.success
+      : diff.scoreChange < 0 ? this.colors.error
+      : this.colors.secondary;
+    const scoreArrow = diff.scoreChange > 0 ? '▲' : diff.scoreChange < 0 ? '▼' : '—';
+    const scoreSign = diff.scoreChange > 0 ? '+' : '';
+
+    // Score comparison boxes
+    const boxY = doc.y;
+    // Previous score box
+    doc.roundedRect(55, boxY, 140, 60, 5).fill(this.colors.lightGray);
+    doc
+      .font('Helvetica-Bold')
+      .fontSize(24)
+      .fillColor(this.colors.secondary)
+      .text(String(diff.previousScore), 60, boxY + 8, { width: 130, align: 'center' });
+    doc
+      .font('Helvetica')
+      .fontSize(9)
+      .fillColor(this.colors.secondary)
+      .text('Previous Score', 60, boxY + 38, { width: 130, align: 'center' });
+
+    // Arrow
+    doc
+      .font('Helvetica-Bold')
+      .fontSize(20)
+      .fillColor(scoreChangeColor)
+      .text('→', 210, boxY + 12, { width: 40, align: 'center' });
+
+    // Current score box
+    const currentScoreColor = diff.currentScore >= 80 ? this.colors.success
+      : diff.currentScore >= 50 ? this.colors.warning
+      : this.colors.error;
+    doc.roundedRect(260, boxY, 140, 60, 5).fill(this.colors.lightGray);
+    doc
+      .font('Helvetica-Bold')
+      .fontSize(24)
+      .fillColor(currentScoreColor)
+      .text(String(diff.currentScore), 265, boxY + 8, { width: 130, align: 'center' });
+    doc
+      .font('Helvetica')
+      .fontSize(9)
+      .fillColor(this.colors.secondary)
+      .text('Current Score', 265, boxY + 38, { width: 130, align: 'center' });
+
+    // Delta badge
+    doc.roundedRect(420, boxY + 10, 100, 40, 5).fill(scoreChangeColor);
+    doc
+      .font('Helvetica-Bold')
+      .fontSize(16)
+      .fillColor(this.colors.white)
+      .text(`${scoreArrow} ${scoreSign}${diff.scoreChange}`, 425, boxY + 18, { width: 90, align: 'center' });
+
+    doc.y = boxY + 75;
+
+    // Summary deltas
+    doc.moveDown(0.5);
+    this.addSubHeader(doc, 'Issue Count Changes');
+    doc.moveDown(0.3);
+    const deltas = diff.summaryDelta;
+    const deltaItems = [
+      { label: 'Total Issues', value: deltas.totalIssues },
+      { label: 'Errors', value: deltas.errors },
+      { label: 'Warnings', value: deltas.warnings },
+      { label: 'Informational', value: deltas.info },
+    ];
+    deltaItems.forEach((item) => {
+      const sign = item.value > 0 ? '+' : '';
+      const color = item.value > 0 ? this.colors.error
+        : item.value < 0 ? this.colors.success
+        : this.colors.secondary;
+      doc
+        .font('Helvetica')
+        .fontSize(10)
+        .fillColor(this.colors.black)
+        .text(`${item.label}: `, 60, doc.y, { continued: true })
+        .font('Helvetica-Bold')
+        .fillColor(color)
+        .text(`${sign}${item.value}`);
+    });
+
+    // Resolved issues (green — good news)
+    if (diff.resolvedIssues.length > 0) {
+      doc.moveDown(1);
+      this.addSubHeader(doc, `Resolved Issues (${diff.resolvedIssues.length})`);
+      doc.moveDown(0.3);
+
+      diff.resolvedIssues.slice(0, 15).forEach((issue) => {
+        if (doc.y > 720) doc.addPage();
+        doc
+          .font('Helvetica')
+          .fontSize(9)
+          .fillColor(this.colors.success)
+          .text('  ✓ ', 60, doc.y, { continued: true })
+          .fillColor(this.colors.black)
+          .text(`[${issue.severity}] ${issue.message}`, { width: 450 });
+        if (issue.path) {
+          doc
+            .font('Helvetica')
+            .fontSize(8)
+            .fillColor(this.colors.info)
+            .text(`    Path: ${issue.path}`, 60);
+        }
+      });
+      if (diff.resolvedIssues.length > 15) {
+        doc
+          .font('Helvetica')
+          .fontSize(9)
+          .fillColor(this.colors.secondary)
+          .text(`  ... and ${diff.resolvedIssues.length - 15} more resolved`, 60);
+      }
+    }
+
+    // New issues (red — needs attention)
+    if (diff.newIssues.length > 0) {
+      doc.moveDown(1);
+      this.addSubHeader(doc, `New Issues Introduced (${diff.newIssues.length})`);
+      doc.moveDown(0.3);
+
+      diff.newIssues.slice(0, 15).forEach((issue) => {
+        if (doc.y > 720) doc.addPage();
+        const sevColor = this.getSeverityColor(issue.severity);
+        doc
+          .font('Helvetica')
+          .fontSize(9)
+          .fillColor(sevColor)
+          .text('  ● ', 60, doc.y, { continued: true })
+          .fillColor(this.colors.black)
+          .text(`[${issue.severity}] ${issue.message}`, { width: 450 });
+        if (issue.path) {
+          doc
+            .font('Helvetica')
+            .fontSize(8)
+            .fillColor(this.colors.info)
+            .text(`    Path: ${issue.path}`, 60);
+        }
+      });
+      if (diff.newIssues.length > 15) {
+        doc
+          .font('Helvetica')
+          .fontSize(9)
+          .fillColor(this.colors.secondary)
+          .text(`  ... and ${diff.newIssues.length - 15} more new issues`, 60);
+      }
+    }
+
+    // Persisting issues count
+    if (diff.persistingIssues.length > 0) {
+      doc.moveDown(1);
+      doc
+        .font('Helvetica')
+        .fontSize(10)
+        .fillColor(this.colors.secondary)
+        .text(`${diff.persistingIssues.length} issue(s) remain unchanged from the previous scan.`, 60);
+    }
+
+    // Net result summary
+    doc.moveDown(1.5);
+    const netText = diff.scoreChange > 0
+      ? `Overall improvement: score increased by ${diff.scoreChange} point(s).`
+      : diff.scoreChange < 0
+        ? `Quality decreased: score dropped by ${Math.abs(diff.scoreChange)} point(s). Please review new issues above.`
+        : 'No change in overall quality score since the last scan.';
+    doc
+      .font('Helvetica-Bold')
+      .fontSize(11)
+      .fillColor(scoreChangeColor)
+      .text(netText, { align: 'center' });
   }
 
   // ===================== HELPERS =====================
