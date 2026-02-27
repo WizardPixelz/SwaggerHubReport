@@ -14,11 +14,8 @@ module.exports = {
     s3Bucket: process.env.REPORT_S3_BUCKET || 'swaggerhub-validation-reports',
   },
 
-  microsoft365: {
-    tenantId: process.env.M365_TENANT_ID || '',
-    clientId: process.env.M365_CLIENT_ID || '',
-    clientSecret: process.env.M365_CLIENT_SECRET || '',
-    senderEmail: process.env.M365_SENDER_EMAIL || 'noreply@yourdomain.com',
+  notifications: {
+    teamsWebhookUrl: process.env.TEAMS_WEBHOOK_URL || '',
   },
 
   defaultNotifyEmail: process.env.DEFAULT_NOTIFY_EMAIL || '',

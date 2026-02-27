@@ -7,7 +7,7 @@
  * - S3 bucket (stores PDF reports)
  * - IAM roles and policies
  *
- * Email delivery uses Microsoft Graph API (M365) — no SES required.
+ * Notifications sent via Microsoft Teams incoming webhook.
  */
 
 const cdk = require('aws-cdk-lib');
@@ -72,11 +72,8 @@ class SwaggerHubValidationStack extends cdk.Stack {
         // SWAGGERHUB_API_KEY is set via SSM Parameter Store or Secrets Manager
         SWAGGERHUB_API_KEY: '',
         REPORT_S3_BUCKET: reportBucket.bucketName,
-        M365_TENANT_ID: '', // Azure AD tenant ID
-        M365_CLIENT_ID: '', // Azure AD app registration client ID
-        M365_CLIENT_SECRET: '', // Azure AD app registration client secret (use Secrets Manager in production)
-        M365_SENDER_EMAIL: 'noreply@yourdomain.com', // M365 mailbox to send from
-        DEFAULT_NOTIFY_EMAIL: '', // Update this
+        TEAMS_WEBHOOK_URL: '', // Teams incoming webhook URL
+        DEFAULT_NOTIFY_EMAIL: '', // Optional — not used with Teams
         INCLUDE_BEST_PRACTICES: 'true',
         COMPANY_NAME: 'API Governance Team',
         REPORT_TITLE: 'API Validation Report',
@@ -89,7 +86,7 @@ class SwaggerHubValidationStack extends cdk.Stack {
     // Grant Lambda permissions to write to S3
     reportBucket.grantReadWrite(validationLambda);
 
-    // Email is sent via Microsoft Graph API (M365) — no SES IAM permissions needed
+    // Notifications sent via Microsoft Teams webhook — no email IAM permissions needed
 
     // Grant Lambda permissions to publish CloudWatch custom metrics
     validationLambda.addToRolePolicy(

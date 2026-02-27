@@ -15,13 +15,13 @@ NATIVE TO AWS (managed services and SDKs provided by Amazon)
   9. @aws-sdk/s3-request-presigner — SDK module for presigned S3 download URLs (7-day expiry)
  10. @aws-sdk/client-cloudwatch    — SDK module for CloudWatch PutMetricData
 
- [Removed] Amazon SES, @aws-sdk/client-ses — Replaced by Microsoft Graph API (M365)
+ [Removed] Amazon SES, @aws-sdk/client-ses — Replaced by Microsoft Teams incoming webhook
 
 
-NATIVE TO MICROSOFT 365 (Azure AD / Microsoft Graph)
------------------------------------------------------
- 11. Microsoft Graph API (Mail.Send) — Sends validation report emails via M365 mailbox
- 12. Azure AD (OAuth2 client credentials) — Authenticates the app to send email on behalf of a mailbox
+NATIVE TO MICROSOFT TEAMS
+--------------------------
+ 11. Microsoft Teams Incoming Webhooks — Receives Adaptive Card notifications in a Teams channel
+     (No Azure AD, no OAuth, no email server — just a webhook URL)
 
 
 NATIVE TO SWAGGERHUB (provided by SmartBear / SwaggerHub platform)
@@ -73,8 +73,8 @@ Each item lists available AWS or SwaggerHub alternatives, if any.
  31. S3 Service (s3-service.js)                    — Uploads PDFs and generates presigned download URLs
      a) [*] KEEP CUSTOM — Thin wrapper around the AWS SDK; nothing to replace
 
- 32. Email Service (email-service.js)              — Sends HTML email + PDF attachment via Microsoft Graph API (M365)
-     a) [*] KEEP CUSTOM — Built on Microsoft Graph API; handles OAuth2, HTML templating, and PDF attachment
+ 32. Notification Service (notification-service.js)   — Posts Adaptive Card to Microsoft Teams via incoming webhook
+     a) [*] KEEP CUSTOM — Simple HTTP POST to Teams webhook; no auth library needed
 
  33. SwaggerHub Client (swaggerhub-client.js)      — Fetches API specs from the SwaggerHub Registry API
      a) SwaggerHub CLI — Official CLI tool; designed for terminal use, not Lambda invocation

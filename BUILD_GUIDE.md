@@ -39,8 +39,8 @@ Before you start, make sure you have the following installed on your machine:
 5. **A SwaggerHub account** with an API key  
    Get your key: https://app.swaggerhub.com/settings/apiKey
 
-6. **A Microsoft 365 account** with an Azure AD app registration
-   (Application permission: `Mail.Send` with admin consent — see Step 12)
+6. **A Microsoft Teams channel** with an incoming webhook URL  
+   (See Step 12 for setup instructions)
 
 ---
 
@@ -173,11 +173,8 @@ module.exports = {
     s3Bucket: process.env.REPORT_S3_BUCKET || 'swaggerhub-validation-reports',
   },
 
-  microsoft365: {
-    tenantId: process.env.M365_TENANT_ID || '',
-    clientId: process.env.M365_CLIENT_ID || '',
-    clientSecret: process.env.M365_CLIENT_SECRET || '',
-    senderEmail: process.env.M365_SENDER_EMAIL || 'noreply@yourdomain.com',
+  notifications: {
+    teamsWebhookUrl: process.env.TEAMS_WEBHOOK_URL || '',
   },
 
   defaultNotifyEmail: process.env.DEFAULT_NOTIFY_EMAIL || '',
@@ -207,14 +204,14 @@ This is the main file that runs when the Lambda is triggered. It orchestrates th
  * SwaggerHub Validation Report - AWS Lambda Handler
  *
  * Receives SwaggerHub webhook events, validates the API spec,
- * generates a PDF report, stores it in S3, and emails it via Microsoft 365.
+ * generates a PDF report, stores it in S3, and notifies via Microsoft Teams.
  */
 
 const { SwaggerHubClient } = require('./services/swaggerhub-client');
 const { ValidationEngine } = require('./services/validation-engine');
 const { ReportGenerator } = require('./services/report-generator');
 const { S3Service } = require('./services/s3-service');
-const { EmailService } = require('./services/email-service');
+const { NotificationService } = require('./services/notification-service');
 const { ScanHistoryService } = require('./services/scan-history-service');
 const { DiffEngine } = require('./services/diff-engine');
 const { createLogger } = require('./services/logger');
@@ -324,21 +321,17 @@ exports.handler = async (event, context) => {
     const reportUrl = await s3Service.uploadReport(reportKey, pdfBuffer);
     apiLog.info('report.uploaded', { reportKey });
 
-    // 6. Send email notification with report
-    const emailService = new EmailService(config.aws);
-    await emailService.sendReport({
-      recipientEmail: webhookPayload.notifyEmail || config.defaultNotifyEmail,
+    // 6. Send Teams notification with report link
+    const notificationService = new NotificationService(config.notifications);
+    await notificationService.sendReport({
       apiName: webhookPayload.apiName,
       apiVersion: webhookPayload.version,
       owner: webhookPayload.owner,
       reportUrl,
-      pdfBuffer,
       validationSummary: validationResults.summary,
       diff,
     });
-    apiLog.info('email.sent', {
-      recipient: webhookPayload.notifyEmail || config.defaultNotifyEmail,
-    });
+    apiLog.info('notification.sent');
 
     // 7. Publish CloudWatch metrics
     const totalDurationMs = Date.now() - pipelineStart;
@@ -2049,318 +2042,214 @@ module.exports = { S3Service };
 
 ---
 
-## Step 12: Create the Email Service
+## Step 12: Create the Notification Service (Teams Webhook)
 
-Sends branded HTML emails with the PDF report attached using Microsoft Graph API (M365).
+Posts an Adaptive Card to a Microsoft Teams channel via an incoming webhook — no Azure AD, no email server, no third-party dependencies beyond `axios`.
 
-**Prerequisites — Azure AD App Registration:**
-1. Go to Azure Portal → Azure Active Directory → App registrations → New registration
-2. Name it (e.g. "SwaggerHub Validation Emailer"), set to single-tenant
-3. Under API permissions → Add permission → Microsoft Graph → Application → `Mail.Send` → Grant admin consent
-4. Under Certificates & secrets → New client secret → copy the value
-5. Note the Application (client) ID, Directory (tenant) ID, and the secret
+**Prerequisites — Teams Incoming Webhook:**
+1. In Microsoft Teams, go to the target channel → **Manage channel** (click `⋯` on the channel name)
+2. Select **Connectors** (or **Edit** → **Connectors**)
+3. Find **Incoming Webhook** → click **Configure**
+4. Name it (e.g. "API Validation Bot"), optionally upload an icon → click **Create**
+5. Copy the webhook URL → set it as `TEAMS_WEBHOOK_URL` in your environment
 
-**File: `src/services/email-service.js`**
+**File: `src/services/notification-service.js`**
 ```javascript
 /**
- * Email Service - Sends validation reports via Microsoft Graph API
+ * Notification Service - Posts validation results to Microsoft Teams
  *
- * Uses OAuth2 client credentials flow to send email through a
- * Microsoft 365 mailbox. No SES dependency — works with any M365 tenant.
+ * Sends an Adaptive Card to a Teams channel via an incoming webhook URL.
+ * No Azure AD, no email server — just a webhook URL from Teams.
  *
- * Required Azure AD app registration:
- *   - Application permission: Mail.Send
- *   - Admin consent granted
+ * Setup:
+ *   1. In Teams, go to the target channel → Manage channel → Connectors
+ *   2. Add "Incoming Webhook" → name it → copy the webhook URL
+ *   3. Set the URL as TEAMS_WEBHOOK_URL in your environment
  *
- * Sends a branded email with:
- * - Inline validation summary
- * - PDF report as an attachment
- * - Link to the report in S3
+ * The card includes:
+ * - Pass/fail status with color coding
+ * - Quality score
+ * - Issue breakdown (errors, warnings, info)
+ * - Diff summary (resolved, new, persisting)
+ * - Download button linking to the S3 presigned URL
  */
 
 const axios = require('axios');
 const { createLogger } = require('./logger');
 
-const log = createLogger({ component: 'email-service' });
+const log = createLogger({ component: 'notification-service' });
 
-class EmailService {
-  constructor(m365Config) {
-    this.tenantId = m365Config.tenantId;
-    this.clientId = m365Config.clientId;
-    this.clientSecret = m365Config.clientSecret;
-    this.senderEmail = m365Config.senderEmail;
-    this._accessToken = null;
-    this._tokenExpiry = 0;
+class NotificationService {
+  constructor(notificationConfig) {
+    this.webhookUrl = notificationConfig.teamsWebhookUrl;
   }
 
   /**
-   * Obtain an OAuth2 access token via client credentials flow
-   */
-  async getAccessToken() {
-    if (this._accessToken && Date.now() < this._tokenExpiry) {
-      return this._accessToken;
-    }
-
-    const tokenUrl = `https://login.microsoftonline.com/${this.tenantId}/oauth2/v2.0/token`;
-    const params = new URLSearchParams({
-      client_id: this.clientId,
-      client_secret: this.clientSecret,
-      scope: 'https://graph.microsoft.com/.default',
-      grant_type: 'client_credentials',
-    });
-
-    const response = await axios.post(tokenUrl, params.toString(), {
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    });
-
-    this._accessToken = response.data.access_token;
-    this._tokenExpiry = Date.now() + (response.data.expires_in - 300) * 1000;
-    return this._accessToken;
-  }
-
-  /**
-   * Send a validation report email
-   * @param {object} params
-   * @param {string} params.recipientEmail - Recipient email address
-   * @param {string} params.apiName - Name of the API
-   * @param {string} params.apiVersion - Version of the API
-   * @param {string} params.owner - API owner
-   * @param {string} params.reportUrl - S3 presigned URL for the report
-   * @param {Buffer} params.pdfBuffer - PDF file buffer to attach
-   * @param {object} params.validationSummary - Validation summary object
+   * Send a validation report notification to Teams
    */
   async sendReport(params) {
-    const {
-      recipientEmail,
-      apiName,
-      apiVersion,
-      owner,
-      reportUrl,
-      pdfBuffer,
-      validationSummary,
-    } = params;
+    if (!this.webhookUrl) {
+      log.warn('notification.skipped', { reason: 'No Teams webhook URL configured' });
+      return;
+    }
 
-    const subject = `API Validation Report: ${apiName} v${apiVersion} - ${
-      validationSummary.passedValidation ? 'PASSED ✓' : 'FAILED ✗'
-    }`;
+    const card = this.buildAdaptiveCard(params);
 
-    const htmlBody = this.buildEmailHtml(params);
-    const textBody = this.buildEmailText(params);
-
-    // Build Microsoft Graph sendMail payload
-    const message = {
-      message: {
-        subject,
-        body: {
-          contentType: 'HTML',
-          content: htmlBody,
-        },
-        toRecipients: [
-          {
-            emailAddress: { address: recipientEmail },
-          },
-        ],
-        attachments: [
-          {
-            '@odata.type': '#microsoft.graph.fileAttachment',
-            name: `validation-report-${apiName}-${apiVersion}.pdf`,
-            contentType: 'application/pdf',
-            contentBytes: pdfBuffer.toString('base64'),
-          },
-        ],
-      },
-      saveToSentItems: false,
-    };
-
-    const accessToken = await this.getAccessToken();
-    const graphUrl = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(this.senderEmail)}/sendMail`;
-
-    await axios.post(graphUrl, message, {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        'Content-Type': 'application/json',
-      },
+    await axios.post(this.webhookUrl, card, {
+      headers: { 'Content-Type': 'application/json' },
     });
 
-    log.info('email.sent', { recipient: recipientEmail, apiName, apiVersion });
+    log.info('notification.sent', {
+      apiName: params.apiName,
+      apiVersion: params.apiVersion,
+      channel: 'teams',
+    });
   }
 
   /**
-   * Build the HTML email body
+   * Build a Teams Adaptive Card with validation results
    */
-  buildEmailHtml(params) {
-    const { apiName, apiVersion, owner, reportUrl, validationSummary } = params;
+  buildAdaptiveCard(params) {
+    const { apiName, apiVersion, owner, reportUrl, validationSummary, diff } = params;
     const s = validationSummary;
-    const statusColor = s.passedValidation ? '#16a34a' : '#dc2626';
-    const statusText = s.passedValidation ? 'PASSED' : 'FAILED';
-    const statusIcon = s.passedValidation ? '✓' : '✗';
+    const passed = s.passedValidation;
+    const statusEmoji = passed ? '✅' : '❌';
+    const statusText = passed ? 'PASSED' : 'FAILED';
 
-    return `
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f3f4f6; margin: 0; padding: 20px; }
-    .container { max-width: 600px; margin: 0 auto; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
-    .header { background: #1a56db; padding: 30px; text-align: center; }
-    .header h1 { color: white; margin: 0; font-size: 22px; }
-    .header p { color: #bfdbfe; margin: 5px 0 0; font-size: 14px; }
-    .status-banner { background: ${statusColor}; padding: 15px; text-align: center; }
-    .status-banner h2 { color: white; margin: 0; font-size: 20px; }
-    .content { padding: 30px; }
-    .api-info { background: #f9fafb; border-radius: 6px; padding: 15px; margin-bottom: 20px; }
-    .api-info h3 { margin: 0 0 8px; color: #374151; font-size: 16px; }
-    .api-info p { margin: 3px 0; color: #6b7280; font-size: 14px; }
-    .stats { display: flex; text-align: center; margin: 20px 0; }
-    .stat { flex: 1; padding: 15px; }
-    .stat .value { font-size: 28px; font-weight: bold; }
-    .stat .label { font-size: 12px; color: #6b7280; margin-top: 4px; }
-    .stat.errors .value { color: #dc2626; }
-    .stat.warnings .value { color: #f59e0b; }
-    .stat.info .value { color: #3b82f6; }
-    .stat.score .value { color: #1a56db; }
-    .download-btn { display: inline-block; background: #1a56db; color: white; text-decoration: none; padding: 12px 30px; border-radius: 6px; font-weight: bold; font-size: 14px; }
-    .download-btn:hover { background: #1e40af; }
-    .footer { background: #f9fafb; padding: 20px; text-align: center; font-size: 12px; color: #9ca3af; border-top: 1px solid #e5e7eb; }
-    .score-badge { display: inline-block; background: ${statusColor}; color: white; padding: 8px 16px; border-radius: 20px; font-size: 16px; font-weight: bold; }
-    table { width: 100%; border-collapse: collapse; margin: 15px 0; }
-    th { background: #1a56db; color: white; padding: 8px 12px; text-align: left; font-size: 12px; }
-    td { padding: 8px 12px; border-bottom: 1px solid #e5e7eb; font-size: 13px; }
-    tr:nth-child(even) td { background: #f9fafb; }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <div class="header">
-      <h1>API Validation Report</h1>
-      <p>Automated SwaggerHub Spec Analysis</p>
-    </div>
+    const body = [
+      {
+        type: 'TextBlock',
+        size: 'Large',
+        weight: 'Bolder',
+        text: `${statusEmoji} API Validation Report`,
+        wrap: true,
+      },
+      {
+        type: 'FactSet',
+        facts: [
+          { title: 'API', value: apiName },
+          { title: 'Version', value: apiVersion },
+          { title: 'Owner', value: owner },
+          { title: 'Status', value: `**${statusText}**` },
+          { title: 'Score', value: `**${s.score}/100**` },
+        ],
+      },
+      { type: 'TextBlock', text: '---', spacing: 'Small' },
+      {
+        type: 'TextBlock',
+        weight: 'Bolder',
+        text: 'Issue Summary',
+        spacing: 'Medium',
+      },
+      {
+        type: 'ColumnSet',
+        columns: [
+          this._statColumn('Total', String(s.totalIssues), 'Default'),
+          this._statColumn('Errors', String(s.errors), s.errors > 0 ? 'Attention' : 'Good'),
+          this._statColumn('Warnings', String(s.warnings), s.warnings > 0 ? 'Warning' : 'Good'),
+          this._statColumn('Info', String(s.info), 'Default'),
+        ],
+      },
+    ];
 
-    <div class="status-banner">
-      <h2>${statusIcon} Validation ${statusText}</h2>
-    </div>
+    // Categories breakdown
+    if (s.categories && Object.keys(s.categories).length > 0) {
+      body.push({
+        type: 'TextBlock',
+        weight: 'Bolder',
+        text: 'By Category',
+        spacing: 'Medium',
+      });
+      const catFacts = Object.entries(s.categories).map(([cat, counts]) => ({
+        title: cat,
+        value: `${counts.count} issue(s) (${counts.errors} errors, ${counts.warnings} warnings)`,
+      }));
+      body.push({ type: 'FactSet', facts: catFacts });
+    }
 
-    <div class="content">
-      <div class="api-info">
-        <h3>${apiName}</h3>
-        <p><strong>Version:</strong> ${apiVersion}</p>
-        <p><strong>Owner:</strong> ${owner}</p>
-        <p><strong>Analyzed:</strong> ${new Date().toLocaleString()}</p>
-      </div>
+    // Diff section
+    if (diff && !diff.isFirstScan) {
+      const scoreChangeStr =
+        diff.scoreChange > 0
+          ? `+${diff.scoreChange} 📈`
+          : diff.scoreChange < 0
+            ? `${diff.scoreChange} 📉`
+            : `±0`;
+      body.push(
+        { type: 'TextBlock', text: '---', spacing: 'Small' },
+        { type: 'TextBlock', weight: 'Bolder', text: 'Changes Since Last Scan', spacing: 'Medium' },
+        {
+          type: 'FactSet',
+          facts: [
+            { title: 'Score Change', value: `${diff.previousScore} → ${diff.currentScore} (${scoreChangeStr})` },
+            { title: 'Resolved', value: `✅ ${diff.resolvedIssues.length} issue(s)` },
+            { title: 'New', value: `🆕 ${diff.newIssues.length} issue(s)` },
+            { title: 'Persisting', value: `${diff.persistingIssues.length} issue(s)` },
+          ],
+        }
+      );
+    }
 
-      <div style="text-align: center; margin: 20px 0;">
-        <span class="score-badge">Quality Score: ${s.score}/100</span>
-      </div>
+    // Timestamp
+    body.push({
+      type: 'TextBlock',
+      text: `Generated: ${new Date().toLocaleString()}`,
+      size: 'Small',
+      isSubtle: true,
+      spacing: 'Medium',
+    });
 
-      <!-- Stats Grid -->
-      <table>
-        <tr>
-          <th>Metric</th>
-          <th style="text-align: center">Count</th>
-        </tr>
-        <tr>
-          <td>Total Issues</td>
-          <td style="text-align: center; font-weight: bold">${s.totalIssues}</td>
-        </tr>
-        <tr>
-          <td style="color: #dc2626">● Errors</td>
-          <td style="text-align: center; font-weight: bold; color: #dc2626">${s.errors}</td>
-        </tr>
-        <tr>
-          <td style="color: #f59e0b">▲ Warnings</td>
-          <td style="text-align: center; font-weight: bold; color: #f59e0b">${s.warnings}</td>
-        </tr>
-        <tr>
-          <td style="color: #3b82f6">○ Informational</td>
-          <td style="text-align: center; font-weight: bold; color: #3b82f6">${s.info}</td>
-        </tr>
-        <tr>
-          <td style="color: #6b7280">◇ Hints</td>
-          <td style="text-align: center; font-weight: bold; color: #6b7280">${s.hints}</td>
-        </tr>
-      </table>
-
-      ${
-        Object.keys(s.categories).length > 0
-          ? `
-      <h3 style="color: #374151; font-size: 14px; margin-top: 25px;">Issues by Category</h3>
-      <table>
-        <tr>
-          <th>Category</th>
-          <th style="text-align: center">Issues</th>
-          <th style="text-align: center">Errors</th>
-        </tr>
-        ${Object.entries(s.categories)
-          .map(
-            ([cat, counts]) => `
-        <tr>
-          <td>${cat}</td>
-          <td style="text-align: center">${counts.count}</td>
-          <td style="text-align: center; ${
-            counts.errors > 0 ? 'color: #dc2626; font-weight: bold' : ''
-          }">${counts.errors}</td>
-        </tr>`
-          )
-          .join('')}
-      </table>`
-          : ''
-      }
-
-      <div style="text-align: center; margin: 30px 0 10px;">
-        <p style="margin-bottom: 15px; color: #6b7280; font-size: 13px;">
-          The full PDF report is attached to this email.
-        </p>
-        <a href="${reportUrl}" class="download-btn">Download Full Report</a>
-      </div>
-    </div>
-
-    <div class="footer">
-      <p>This report was automatically generated by the API Governance validation pipeline.</p>
-      <p>For questions or exceptions, contact the API Governance team.</p>
-    </div>
-  </div>
-</body>
-</html>`;
+    return {
+      type: 'message',
+      attachments: [
+        {
+          contentType: 'application/vnd.microsoft.card.adaptive',
+          contentUrl: null,
+          content: {
+            $schema: 'http://adaptivecards.io/schemas/adaptive-card.json',
+            type: 'AdaptiveCard',
+            version: '1.4',
+            msteams: { width: 'Full' },
+            body,
+            actions: [
+              { type: 'Action.OpenUrl', title: '📄 Download PDF Report', url: reportUrl },
+            ],
+          },
+        },
+      ],
+    };
   }
 
   /**
-   * Build plain text email fallback
+   * Build a stat column for the ColumnSet
    */
-  buildEmailText(params) {
-    const { apiName, apiVersion, owner, reportUrl, validationSummary } = params;
-    const s = validationSummary;
-
-    return [
-      `API VALIDATION REPORT`,
-      `====================`,
-      ``,
-      `API: ${apiName}`,
-      `Version: ${apiVersion}`,
-      `Owner: ${owner}`,
-      `Status: ${s.passedValidation ? 'PASSED' : 'FAILED'}`,
-      `Score: ${s.score}/100`,
-      ``,
-      `SUMMARY`,
-      `-------`,
-      `Total Issues: ${s.totalIssues}`,
-      `  Errors:   ${s.errors}`,
-      `  Warnings: ${s.warnings}`,
-      `  Info:     ${s.info}`,
-      `  Hints:    ${s.hints}`,
-      ``,
-      `Download the full PDF report: ${reportUrl}`,
-      ``,
-      `(The PDF report is also attached to this email.)`,
-      ``,
-      `---`,
-      `Automated API Governance Validation`,
-    ].join('\n');
+  _statColumn(label, value, color) {
+    return {
+      type: 'Column',
+      width: 'stretch',
+      items: [
+        {
+          type: 'TextBlock',
+          text: value,
+          size: 'ExtraLarge',
+          weight: 'Bolder',
+          horizontalAlignment: 'Center',
+          color,
+        },
+        {
+          type: 'TextBlock',
+          text: label,
+          size: 'Small',
+          horizontalAlignment: 'Center',
+          isSubtle: true,
+          spacing: 'None',
+        },
+      ],
+    };
   }
-
 }
 
-module.exports = { EmailService };
+module.exports = { NotificationService };
 ```
 
 ---

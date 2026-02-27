@@ -2,14 +2,14 @@
  * SwaggerHub Validation Report - AWS Lambda Handler
  *
  * Receives SwaggerHub webhook events, validates the API spec,
- * generates a PDF report, stores it in S3, and emails it via Microsoft 365.
+ * generates a PDF report, stores it in S3, and notifies via Microsoft Teams.
  */
 
 const { SwaggerHubClient } = require('./services/swaggerhub-client');
 const { ValidationEngine } = require('./services/validation-engine');
 const { ReportGenerator } = require('./services/report-generator');
 const { S3Service } = require('./services/s3-service');
-const { EmailService } = require('./services/email-service');
+const { NotificationService } = require('./services/notification-service');
 const { ScanHistoryService } = require('./services/scan-history-service');
 const { DiffEngine } = require('./services/diff-engine');
 const { createLogger } = require('./services/logger');
@@ -128,21 +128,17 @@ exports.handler = async (event, context) => {
     const reportUrl = await s3Service.uploadReport(reportKey, pdfBuffer);
     apiLog.info('report.uploaded', { reportKey });
 
-    // 6. Send email notification via Microsoft 365
-    const emailService = new EmailService(config.microsoft365);
-    await emailService.sendReport({
-      recipientEmail: webhookPayload.notifyEmail || config.defaultNotifyEmail,
+    // 6. Send Teams notification with report link
+    const notificationService = new NotificationService(config.notifications);
+    await notificationService.sendReport({
       apiName: webhookPayload.apiName,
       apiVersion: webhookPayload.version,
       owner: webhookPayload.owner,
       reportUrl,
-      pdfBuffer,
       validationSummary: validationResults.summary,
       diff,
     });
-    apiLog.info('email.sent', {
-      recipient: webhookPayload.notifyEmail || config.defaultNotifyEmail,
-    });
+    apiLog.info('notification.sent');
 
     // 7. Publish CloudWatch metrics
     const totalDurationMs = Date.now() - pipelineStart;
