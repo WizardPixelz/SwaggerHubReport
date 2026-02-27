@@ -12,7 +12,13 @@ module.exports = {
   aws: {
     region: process.env.AWS_REGION || 'us-east-1',
     s3Bucket: process.env.REPORT_S3_BUCKET || 'swaggerhub-validation-reports',
-    sesFromEmail: process.env.SES_FROM_EMAIL || 'noreply@yourdomain.com',
+  },
+
+  microsoft365: {
+    tenantId: process.env.M365_TENANT_ID || '',
+    clientId: process.env.M365_CLIENT_ID || '',
+    clientSecret: process.env.M365_CLIENT_SECRET || '',
+    senderEmail: process.env.M365_SENDER_EMAIL || 'noreply@yourdomain.com',
   },
 
   defaultNotifyEmail: process.env.DEFAULT_NOTIFY_EMAIL || '',

@@ -5,8 +5,9 @@
  * - API Gateway (receives SwaggerHub webhooks)
  * - Lambda function (validates API specs, generates reports)
  * - S3 bucket (stores PDF reports)
- * - SES identity (sends email reports)
  * - IAM roles and policies
+ *
+ * Email delivery uses Microsoft Graph API (M365) — no SES required.
  */
 
 const cdk = require('aws-cdk-lib');
@@ -71,7 +72,10 @@ class SwaggerHubValidationStack extends cdk.Stack {
         // SWAGGERHUB_API_KEY is set via SSM Parameter Store or Secrets Manager
         SWAGGERHUB_API_KEY: '',
         REPORT_S3_BUCKET: reportBucket.bucketName,
-        SES_FROM_EMAIL: 'noreply@yourdomain.com', // Update this
+        M365_TENANT_ID: '', // Azure AD tenant ID
+        M365_CLIENT_ID: '', // Azure AD app registration client ID
+        M365_CLIENT_SECRET: '', // Azure AD app registration client secret (use Secrets Manager in production)
+        M365_SENDER_EMAIL: 'noreply@yourdomain.com', // M365 mailbox to send from
         DEFAULT_NOTIFY_EMAIL: '', // Update this
         INCLUDE_BEST_PRACTICES: 'true',
         COMPANY_NAME: 'API Governance Team',
@@ -85,14 +89,7 @@ class SwaggerHubValidationStack extends cdk.Stack {
     // Grant Lambda permissions to write to S3
     reportBucket.grantReadWrite(validationLambda);
 
-    // Grant Lambda permissions to send emails via SES
-    validationLambda.addToRolePolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ['ses:SendRawEmail', 'ses:SendEmail'],
-        resources: ['*'], // Scope this to specific identities in production
-      })
-    );
+    // Email is sent via Microsoft Graph API (M365) — no SES IAM permissions needed
 
     // Grant Lambda permissions to publish CloudWatch custom metrics
     validationLambda.addToRolePolicy(

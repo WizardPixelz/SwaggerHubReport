@@ -2,7 +2,7 @@
  * SwaggerHub Validation Report - AWS Lambda Handler
  *
  * Receives SwaggerHub webhook events, validates the API spec,
- * generates a PDF report, stores it in S3, and emails it via SES.
+ * generates a PDF report, stores it in S3, and emails it via Microsoft 365.
  */
 
 const { SwaggerHubClient } = require('./services/swaggerhub-client');
@@ -128,8 +128,8 @@ exports.handler = async (event, context) => {
     const reportUrl = await s3Service.uploadReport(reportKey, pdfBuffer);
     apiLog.info('report.uploaded', { reportKey });
 
-    // 6. Send email notification with report
-    const emailService = new EmailService(config.aws);
+    // 6. Send email notification via Microsoft 365
+    const emailService = new EmailService(config.microsoft365);
     await emailService.sendReport({
       recipientEmail: webhookPayload.notifyEmail || config.defaultNotifyEmail,
       apiName: webhookPayload.apiName,

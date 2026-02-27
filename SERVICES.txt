@@ -7,15 +7,21 @@ NATIVE TO AWS (managed services and SDKs provided by Amazon)
   1. AWS Lambda                   — Serverless compute; runs the validation pipeline on each webhook trigger
   2. Amazon API Gateway           — REST endpoint that receives SwaggerHub webhook POST requests
   3. Amazon S3                    — Stores generated PDF reports and scan history JSON files
-  4. Amazon SES                   — Sends validation report emails with PDF attachments
-  5. Amazon CloudWatch Logs       — Receives structured JSON logs from the Lambda function
-  6. Amazon CloudWatch Metrics    — Custom metrics (validation scores, issue counts, pipeline duration)
-  7. AWS IAM                      — Manages roles and policies for Lambda to access S3, SES, and CloudWatch
-  8. AWS CDK / CDK CLI            — Infrastructure-as-code framework to provision all AWS resources
-  9. @aws-sdk/client-s3           — SDK module for S3 PutObject, GetObject operations
- 10. @aws-sdk/s3-request-presigner — SDK module for presigned S3 download URLs (7-day expiry)
- 11. @aws-sdk/client-ses           — SDK module for SES SendRawEmail (MIME multipart with attachment)
- 12. @aws-sdk/client-cloudwatch    — SDK module for CloudWatch PutMetricData
+  4. Amazon CloudWatch Logs       — Receives structured JSON logs from the Lambda function
+  5. Amazon CloudWatch Metrics    — Custom metrics (validation scores, issue counts, pipeline duration)
+  6. AWS IAM                      — Manages roles and policies for Lambda to access S3 and CloudWatch
+  7. AWS CDK / CDK CLI            — Infrastructure-as-code framework to provision all AWS resources
+  8. @aws-sdk/client-s3           — SDK module for S3 PutObject, GetObject operations
+  9. @aws-sdk/s3-request-presigner — SDK module for presigned S3 download URLs (7-day expiry)
+ 10. @aws-sdk/client-cloudwatch    — SDK module for CloudWatch PutMetricData
+
+ [Removed] Amazon SES, @aws-sdk/client-ses — Replaced by Microsoft Graph API (M365)
+
+
+NATIVE TO MICROSOFT 365 (Azure AD / Microsoft Graph)
+-----------------------------------------------------
+ 11. Microsoft Graph API (Mail.Send) — Sends validation report emails via M365 mailbox
+ 12. Azure AD (OAuth2 client credentials) — Authenticates the app to send email on behalf of a mailbox
 
 
 NATIVE TO SWAGGERHUB (provided by SmartBear / SwaggerHub platform)
@@ -67,10 +73,8 @@ Each item lists available AWS or SwaggerHub alternatives, if any.
  31. S3 Service (s3-service.js)                    — Uploads PDFs and generates presigned download URLs
      a) [*] KEEP CUSTOM — Thin wrapper around the AWS SDK; nothing to replace
 
- 32. Email Service (email-service.js)              — Assembles MIME email with inline summary + PDF attachment
-     a) Amazon SNS — Simple notifications (text/email); cannot attach PDFs or send rich HTML
-     b) Amazon Pinpoint — Campaign-oriented email with templates; heavier setup, better for bulk sends
-     c) [*] KEEP CUSTOM (SES) — SES is already the underlying transport; our service adds MIME assembly + branding
+ 32. Email Service (email-service.js)              — Sends HTML email + PDF attachment via Microsoft Graph API (M365)
+     a) [*] KEEP CUSTOM — Built on Microsoft Graph API; handles OAuth2, HTML templating, and PDF attachment
 
  33. SwaggerHub Client (swaggerhub-client.js)      — Fetches API specs from the SwaggerHub Registry API
      a) SwaggerHub CLI — Official CLI tool; designed for terminal use, not Lambda invocation

@@ -39,8 +39,8 @@ Before you start, make sure you have the following installed on your machine:
 5. **A SwaggerHub account** with an API key  
    Get your key: https://app.swaggerhub.com/settings/apiKey
 
-6. **A verified email address or domain in AWS SES**  
-   (Instructions in Step 11 below)
+6. **A Microsoft 365 account** with an Azure AD app registration
+   (Application permission: `Mail.Send` with admin consent — see Step 12)
 
 ---
 
@@ -76,7 +76,6 @@ Create a file called `package.json` in the root of your project folder. You can 
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.400.0",
-    "@aws-sdk/client-ses": "^3.400.0",
     "@aws-sdk/client-cloudwatch": "^3.400.0",
     "@aws-sdk/s3-request-presigner": "^3.400.0",
     "pdfkit": "^0.13.0",
@@ -97,7 +96,6 @@ Create a file called `package.json` in the root of your project folder. You can 
 
 **What each dependency does:**
 - `@aws-sdk/client-s3` — AWS SDK to upload PDF reports to S3
-- `@aws-sdk/client-ses` — AWS SDK to send emails via SES
 - `@aws-sdk/client-cloudwatch` — AWS SDK to publish custom CloudWatch metrics
 - `@aws-sdk/s3-request-presigner` — Generates presigned S3 download URLs
 - `pdfkit` — Generates PDF documents in Node.js
@@ -173,7 +171,13 @@ module.exports = {
   aws: {
     region: process.env.AWS_REGION || 'us-east-1',
     s3Bucket: process.env.REPORT_S3_BUCKET || 'swaggerhub-validation-reports',
-    sesFromEmail: process.env.SES_FROM_EMAIL || 'noreply@yourdomain.com',
+  },
+
+  microsoft365: {
+    tenantId: process.env.M365_TENANT_ID || '',
+    clientId: process.env.M365_CLIENT_ID || '',
+    clientSecret: process.env.M365_CLIENT_SECRET || '',
+    senderEmail: process.env.M365_SENDER_EMAIL || 'noreply@yourdomain.com',
   },
 
   defaultNotifyEmail: process.env.DEFAULT_NOTIFY_EMAIL || '',
@@ -203,7 +207,7 @@ This is the main file that runs when the Lambda is triggered. It orchestrates th
  * SwaggerHub Validation Report - AWS Lambda Handler
  *
  * Receives SwaggerHub webhook events, validates the API spec,
- * generates a PDF report, stores it in S3, and emails it via SES.
+ * generates a PDF report, stores it in S3, and emails it via Microsoft 365.
  */
 
 const { SwaggerHubClient } = require('./services/swaggerhub-client');
@@ -2047,12 +2051,26 @@ module.exports = { S3Service };
 
 ## Step 12: Create the Email Service
 
-Sends branded HTML emails with the PDF report attached using AWS SES.
+Sends branded HTML emails with the PDF report attached using Microsoft Graph API (M365).
+
+**Prerequisites — Azure AD App Registration:**
+1. Go to Azure Portal → Azure Active Directory → App registrations → New registration
+2. Name it (e.g. "SwaggerHub Validation Emailer"), set to single-tenant
+3. Under API permissions → Add permission → Microsoft Graph → Application → `Mail.Send` → Grant admin consent
+4. Under Certificates & secrets → New client secret → copy the value
+5. Note the Application (client) ID, Directory (tenant) ID, and the secret
 
 **File: `src/services/email-service.js`**
 ```javascript
 /**
- * Email Service - Sends validation reports via AWS SES
+ * Email Service - Sends validation reports via Microsoft Graph API
+ *
+ * Uses OAuth2 client credentials flow to send email through a
+ * Microsoft 365 mailbox. No SES dependency — works with any M365 tenant.
+ *
+ * Required Azure AD app registration:
+ *   - Application permission: Mail.Send
+ *   - Admin consent granted
  *
  * Sends a branded email with:
  * - Inline validation summary
@@ -2060,12 +2078,44 @@ Sends branded HTML emails with the PDF report attached using AWS SES.
  * - Link to the report in S3
  */
 
-const { SESClient, SendRawEmailCommand } = require('@aws-sdk/client-ses');
+const axios = require('axios');
+const { createLogger } = require('./logger');
+
+const log = createLogger({ component: 'email-service' });
 
 class EmailService {
-  constructor(awsConfig) {
-    this.ses = new SESClient({ region: awsConfig.region });
-    this.fromEmail = awsConfig.sesFromEmail;
+  constructor(m365Config) {
+    this.tenantId = m365Config.tenantId;
+    this.clientId = m365Config.clientId;
+    this.clientSecret = m365Config.clientSecret;
+    this.senderEmail = m365Config.senderEmail;
+    this._accessToken = null;
+    this._tokenExpiry = 0;
+  }
+
+  /**
+   * Obtain an OAuth2 access token via client credentials flow
+   */
+  async getAccessToken() {
+    if (this._accessToken && Date.now() < this._tokenExpiry) {
+      return this._accessToken;
+    }
+
+    const tokenUrl = `https://login.microsoftonline.com/${this.tenantId}/oauth2/v2.0/token`;
+    const params = new URLSearchParams({
+      client_id: this.clientId,
+      client_secret: this.clientSecret,
+      scope: 'https://graph.microsoft.com/.default',
+      grant_type: 'client_credentials',
+    });
+
+    const response = await axios.post(tokenUrl, params.toString(), {
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    });
+
+    this._accessToken = response.data.access_token;
+    this._tokenExpiry = Date.now() + (response.data.expires_in - 300) * 1000;
+    return this._accessToken;
   }
 
   /**
@@ -2096,22 +2146,43 @@ class EmailService {
 
     const htmlBody = this.buildEmailHtml(params);
     const textBody = this.buildEmailText(params);
-    const rawEmail = this.buildRawEmail({
-      from: this.fromEmail,
-      to: recipientEmail,
-      subject,
-      htmlBody,
-      textBody,
-      pdfBuffer,
-      attachmentName: `validation-report-${apiName}-${apiVersion}.pdf`,
+
+    // Build Microsoft Graph sendMail payload
+    const message = {
+      message: {
+        subject,
+        body: {
+          contentType: 'HTML',
+          content: htmlBody,
+        },
+        toRecipients: [
+          {
+            emailAddress: { address: recipientEmail },
+          },
+        ],
+        attachments: [
+          {
+            '@odata.type': '#microsoft.graph.fileAttachment',
+            name: `validation-report-${apiName}-${apiVersion}.pdf`,
+            contentType: 'application/pdf',
+            contentBytes: pdfBuffer.toString('base64'),
+          },
+        ],
+      },
+      saveToSentItems: false,
+    };
+
+    const accessToken = await this.getAccessToken();
+    const graphUrl = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(this.senderEmail)}/sendMail`;
+
+    await axios.post(graphUrl, message, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
     });
 
-    const command = new SendRawEmailCommand({
-      RawMessage: { Data: Buffer.from(rawEmail) },
-    });
-
-    await this.ses.send(command);
-    console.log(`Email sent to ${recipientEmail}`);
+    log.info('email.sent', { recipient: recipientEmail, apiName, apiVersion });
   }
 
   /**
@@ -2287,50 +2358,6 @@ class EmailService {
     ].join('\n');
   }
 
-  /**
-   * Build a raw MIME email with PDF attachment
-   */
-  buildRawEmail({ from, to, subject, htmlBody, textBody, pdfBuffer, attachmentName }) {
-    const boundary = `----=_Part_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-    const mixedBoundary = `----=_Mixed_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-
-    const rawEmail = [
-      `From: API Governance <${from}>`,
-      `To: ${to}`,
-      `Subject: ${subject}`,
-      `MIME-Version: 1.0`,
-      `Content-Type: multipart/mixed; boundary="${mixedBoundary}"`,
-      ``,
-      `--${mixedBoundary}`,
-      `Content-Type: multipart/alternative; boundary="${boundary}"`,
-      ``,
-      `--${boundary}`,
-      `Content-Type: text/plain; charset=UTF-8`,
-      `Content-Transfer-Encoding: 7bit`,
-      ``,
-      textBody,
-      ``,
-      `--${boundary}`,
-      `Content-Type: text/html; charset=UTF-8`,
-      `Content-Transfer-Encoding: 7bit`,
-      ``,
-      htmlBody,
-      ``,
-      `--${boundary}--`,
-      ``,
-      `--${mixedBoundary}`,
-      `Content-Type: application/pdf; name="${attachmentName}"`,
-      `Content-Description: ${attachmentName}`,
-      `Content-Disposition: attachment; filename="${attachmentName}"`,
-      `Content-Transfer-Encoding: base64`,
-      ``,
-      pdfBuffer.toString('base64').replace(/(.{76})/g, '$1\n'),
-      ``,
-      `--${mixedBoundary}--`,
-    ].join('\r\n');
-
-    return rawEmail;
-  }
 }
 
 module.exports = { EmailService };

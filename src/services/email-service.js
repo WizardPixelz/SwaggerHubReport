@@ -1,5 +1,12 @@
 /**
- * Email Service - Sends validation reports via AWS SES
+ * Email Service - Sends validation reports via Microsoft Graph API
+ *
+ * Uses OAuth2 client credentials flow to send email through a
+ * Microsoft 365 mailbox. No SES dependency — works with any M365 tenant.
+ *
+ * Required Azure AD app registration:
+ *   - Application permission: Mail.Send
+ *   - Admin consent granted
  *
  * Sends a branded email with:
  * - Inline validation summary
@@ -7,12 +14,45 @@
  * - Link to the report in S3
  */
 
-const { SESClient, SendRawEmailCommand } = require('@aws-sdk/client-ses');
+const axios = require('axios');
+const { createLogger } = require('./logger');
+
+const log = createLogger({ component: 'email-service' });
 
 class EmailService {
-  constructor(awsConfig) {
-    this.ses = new SESClient({ region: awsConfig.region });
-    this.fromEmail = awsConfig.sesFromEmail;
+  constructor(m365Config) {
+    this.tenantId = m365Config.tenantId;
+    this.clientId = m365Config.clientId;
+    this.clientSecret = m365Config.clientSecret;
+    this.senderEmail = m365Config.senderEmail;
+    this._accessToken = null;
+    this._tokenExpiry = 0;
+  }
+
+  /**
+   * Obtain an OAuth2 access token via client credentials flow
+   */
+  async getAccessToken() {
+    if (this._accessToken && Date.now() < this._tokenExpiry) {
+      return this._accessToken;
+    }
+
+    const tokenUrl = `https://login.microsoftonline.com/${this.tenantId}/oauth2/v2.0/token`;
+    const params = new URLSearchParams({
+      client_id: this.clientId,
+      client_secret: this.clientSecret,
+      scope: 'https://graph.microsoft.com/.default',
+      grant_type: 'client_credentials',
+    });
+
+    const response = await axios.post(tokenUrl, params.toString(), {
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    });
+
+    this._accessToken = response.data.access_token;
+    // Expire 5 minutes early to be safe
+    this._tokenExpiry = Date.now() + (response.data.expires_in - 300) * 1000;
+    return this._accessToken;
   }
 
   /**
@@ -43,22 +83,43 @@ class EmailService {
 
     const htmlBody = this.buildEmailHtml(params);
     const textBody = this.buildEmailText(params);
-    const rawEmail = this.buildRawEmail({
-      from: this.fromEmail,
-      to: recipientEmail,
-      subject,
-      htmlBody,
-      textBody,
-      pdfBuffer,
-      attachmentName: `validation-report-${apiName}-${apiVersion}.pdf`,
+
+    // Build Microsoft Graph sendMail payload
+    const message = {
+      message: {
+        subject,
+        body: {
+          contentType: 'HTML',
+          content: htmlBody,
+        },
+        toRecipients: [
+          {
+            emailAddress: { address: recipientEmail },
+          },
+        ],
+        attachments: [
+          {
+            '@odata.type': '#microsoft.graph.fileAttachment',
+            name: `validation-report-${apiName}-${apiVersion}.pdf`,
+            contentType: 'application/pdf',
+            contentBytes: pdfBuffer.toString('base64'),
+          },
+        ],
+      },
+      saveToSentItems: false,
+    };
+
+    const accessToken = await this.getAccessToken();
+    const graphUrl = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(this.senderEmail)}/sendMail`;
+
+    await axios.post(graphUrl, message, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
     });
 
-    const command = new SendRawEmailCommand({
-      RawMessage: { Data: Buffer.from(rawEmail) },
-    });
-
-    await this.ses.send(command);
-    console.log(`Email sent to ${recipientEmail}`);
+    log.info('email.sent', { recipient: recipientEmail, apiName, apiVersion });
   }
 
   /**
@@ -267,50 +328,6 @@ class EmailService {
     return lines.join('\n');
   }
 
-  /**
-   * Build a raw MIME email with PDF attachment
-   */
-  buildRawEmail({ from, to, subject, htmlBody, textBody, pdfBuffer, attachmentName }) {
-    const boundary = `----=_Part_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-    const mixedBoundary = `----=_Mixed_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-
-    const rawEmail = [
-      `From: API Governance <${from}>`,
-      `To: ${to}`,
-      `Subject: ${subject}`,
-      `MIME-Version: 1.0`,
-      `Content-Type: multipart/mixed; boundary="${mixedBoundary}"`,
-      ``,
-      `--${mixedBoundary}`,
-      `Content-Type: multipart/alternative; boundary="${boundary}"`,
-      ``,
-      `--${boundary}`,
-      `Content-Type: text/plain; charset=UTF-8`,
-      `Content-Transfer-Encoding: 7bit`,
-      ``,
-      textBody,
-      ``,
-      `--${boundary}`,
-      `Content-Type: text/html; charset=UTF-8`,
-      `Content-Transfer-Encoding: 7bit`,
-      ``,
-      htmlBody,
-      ``,
-      `--${boundary}--`,
-      ``,
-      `--${mixedBoundary}`,
-      `Content-Type: application/pdf; name="${attachmentName}"`,
-      `Content-Description: ${attachmentName}`,
-      `Content-Disposition: attachment; filename="${attachmentName}"`,
-      `Content-Transfer-Encoding: base64`,
-      ``,
-      pdfBuffer.toString('base64').replace(/(.{76})/g, '$1\n'),
-      ``,
-      `--${mixedBoundary}--`,
-    ].join('\r\n');
-
-    return rawEmail;
-  }
 }
 
 module.exports = { EmailService };
