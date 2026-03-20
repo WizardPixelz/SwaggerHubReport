@@ -1,0 +1,122 @@
+{
+  "reportId": "GATEWAY-2026-03-20-001",
+  "generated": "2026-03-20 08:04 ET",
+  "environment": "Internal Demo / Teams Channel Tab",
+  "actor": "Priya Shah (priya.shah@contoso.com)",
+  "upload": {
+    "owner": "contoso-platform",
+    "apiName": "payments-gateway-api",
+    "version": "2.4.0",
+    "operation": "Create or Update API",
+    "result": "Updated Successfully",
+    "httpStatus": 200,
+    "persistence": "Confirmed in SwaggerHub Registry",
+    "swaggerHubArtifact": "https://app.swaggerhub.com/apis/contoso-platform/payments-gateway-api/2.4.0",
+    "publicationState": "Unpublished"
+  },
+  "inventory": {
+    "openApiVersion": "3.0.3",
+    "title": "Payments Gateway API",
+    "paths": 28,
+    "operations": 74,
+    "schemas": 41,
+    "tags": 11,
+    "servers": 4,
+    "securitySchemes": 3
+  },
+  "governanceScore": {
+    "score": 84,
+    "grade": "B",
+    "critical": 1,
+    "warning": 7,
+    "info": 12
+  },
+  "swaggerHubFindings": [
+    {
+      "severity": "Critical",
+      "area": "Transport Security",
+      "finding": "Production server includes non-TLS URL (http://api.contoso.com/gateway).",
+      "location": "servers[2].url"
+    },
+    {
+      "severity": "Warning",
+      "area": "Operation Design",
+      "finding": "5 operations are missing operationId.",
+      "location": "paths.*.*.operationId"
+    },
+    {
+      "severity": "Warning",
+      "area": "Response Completeness",
+      "finding": "3 operations are missing explicit 4xx response definitions.",
+      "location": "paths./payments/*"
+    },
+    {
+      "severity": "Warning",
+      "area": "Schema Clarity",
+      "finding": "9 schemas are missing description.",
+      "location": "components.schemas.*.description"
+    }
+  ],
+  "localFindings": [
+    {
+      "severity": "Warning",
+      "rule": "GOV-PAG-001",
+      "finding": "Pagination contract is inconsistent across list endpoints (page vs offset).",
+      "location": "paths./transactions, paths./refunds"
+    },
+    {
+      "severity": "Warning",
+      "rule": "GOV-NAM-003",
+      "finding": "Mixed enum naming style (PENDING_APPROVAL vs pending).",
+      "location": "components.schemas.PaymentStatus"
+    },
+    {
+      "severity": "Info",
+      "rule": "GOV-OBS-004",
+      "finding": "Correlation header is documented in only 61% of operations.",
+      "location": "parameters.X-Correlation-Id"
+    },
+    {
+      "severity": "Info",
+      "rule": "GOV-LIFE-002",
+      "finding": "Ownership metadata is incomplete for two gateway domains.",
+      "location": "info.contact"
+    }
+  ],
+  "topFindings": [
+    "Remove non-TLS production server URL and enforce HTTPS-only endpoints.",
+    "Add unique operationId for all operations to improve code generation reliability.",
+    "Standardize pagination model across all collection endpoints.",
+    "Complete schema descriptions for externally consumed DTOs.",
+    "Add and normalize error responses (400, 401, 403, 429) for gateway-protected operations."
+  ],
+  "fixPlan": [
+    {
+      "priority": "P0 (24h)",
+      "item": "Fix transport security issue and redeploy spec."
+    },
+    {
+      "priority": "P1 (2-3 days)",
+      "item": "Fill missing operationId and error responses."
+    },
+    {
+      "priority": "P2 (1 sprint)",
+      "item": "Align pagination and naming conventions."
+    },
+    {
+      "priority": "P2 (1 sprint)",
+      "item": "Improve schema and ownership metadata completeness."
+    }
+  ],
+  "releaseReadiness": {
+    "disposition": "Conditional Pass",
+    "condition": "Resolve all Critical findings before publish.",
+    "postFixTargetScore": "92+ (Grade A)"
+  },
+  "artifacts": [
+    "report.json",
+    "report.md",
+    "source-spec.yaml",
+    "metadata.json"
+  ]
+}

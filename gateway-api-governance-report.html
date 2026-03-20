@@ -1,0 +1,348 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Gateway API Governance Report</title>
+  <style>
+    :root {
+      --bg: #f3f7fb;
+      --card: #ffffff;
+      --ink: #102a43;
+      --muted: #486581;
+      --line: #d9e2ec;
+      --accent: #0f766e;
+      --accent-2: #0e7490;
+      --critical: #b42318;
+      --warning: #b54708;
+      --info: #175cd3;
+      --radius: 12px;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: linear-gradient(180deg, #eef5fb 0%, var(--bg) 100%);
+      color: var(--ink);
+      font-family: "Segoe UI", Roboto, Arial, sans-serif;
+      line-height: 1.45;
+    }
+    .wrap {
+      max-width: 1080px;
+      margin: 28px auto;
+      padding: 0 20px 36px;
+    }
+    .hero {
+      background: linear-gradient(120deg, #0b253d 0%, #134b6f 60%, #0f766e 100%);
+      color: #f7fcff;
+      border-radius: var(--radius);
+      padding: 22px 24px;
+      box-shadow: 0 18px 38px rgba(16,42,67,.18);
+      break-inside: avoid;
+    }
+    .hero h1 { margin: 0; font-size: 26px; letter-spacing: .2px; }
+    .meta-grid {
+      margin-top: 14px;
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0,1fr));
+      gap: 8px 14px;
+      font-size: 14px;
+    }
+    .meta-grid span { color: #dce8f5; }
+    .section {
+      margin-top: 12px;
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 13px 14px;
+      box-shadow: 0 10px 24px rgba(16,42,67,.08);
+      break-inside: avoid;
+    }
+    h2 {
+      margin: 0 0 8px;
+      font-size: 17px;
+      color: var(--accent-2);
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 6px;
+    }
+    .kv {
+      display: grid;
+      grid-template-columns: 280px 1fr;
+      gap: 6px 12px;
+      font-size: 14px;
+    }
+    .kv .k { color: var(--muted); font-weight: 600; }
+    .upload-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      margin-top: 6px;
+    }
+    .upload-item {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 8px 10px;
+      background: #fbfdff;
+    }
+    .upload-item .k {
+      display: block;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: .03em;
+      margin-bottom: 2px;
+    }
+    .upload-item .v {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--ink);
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+    .inventory-grid,
+    .score-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0,1fr));
+      gap: 8px;
+      margin-top: 8px;
+    }
+    .inventory-card,
+    .pill {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 8px 9px;
+      background: #fbfdff;
+    }
+    .inventory-card .label,
+    .pill .label { color: var(--muted); font-size: 11px; }
+    .inventory-card .value {
+      font-size: 16px;
+      font-weight: 700;
+      margin-top: 1px;
+      line-height: 1.25;
+    }
+    .inventory-card .value.text {
+      font-size: 13px;
+      font-weight: 600;
+    }
+    .pill .value { font-size: 20px; font-weight: 700; margin-top: 2px; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+    }
+    th, td {
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+      padding: 10px 8px;
+    }
+    th {
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: .04em;
+      color: var(--muted);
+      background: #f8fbff;
+    }
+    .sev-critical { color: var(--critical); font-weight: 700; }
+    .sev-warning { color: var(--warning); font-weight: 700; }
+    .sev-info { color: var(--info); font-weight: 700; }
+    ul, ol { margin: 10px 0 0 20px; }
+    li { margin-bottom: 6px; }
+    .footer-note {
+      margin-top: 14px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    a { color: #0b6ad4; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code { background: #f3f7fb; padding: 1px 4px; border-radius: 4px; }
+    @media (max-width: 800px) {
+      .meta-grid, .kv { grid-template-columns: 1fr; }
+      .inventory-grid,
+      .score-grid { grid-template-columns: repeat(2, minmax(0,1fr)); }
+      .upload-grid { grid-template-columns: 1fr; }
+    }
+    @media print {
+      @page {
+        size: A4;
+        margin: 12mm;
+      }
+      body {
+        background: #ffffff !important;
+      }
+      .wrap {
+        max-width: none;
+        margin: 0;
+        padding: 0;
+      }
+      .section,
+      .hero {
+        box-shadow: none;
+      }
+      .hero {
+        background: #0f4c6e !important;
+        color: #ffffff !important;
+      }
+      .inventory-grid,
+      .score-grid {
+        grid-template-columns: repeat(4, minmax(0,1fr)) !important;
+      }
+      .upload-grid {
+        grid-template-columns: repeat(2, minmax(0,1fr)) !important;
+      }
+      a {
+        color: #0b6ad4;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="hero">
+      <h1>API Governance & Registry Report</h1>
+      <div class="meta-grid">
+        <div><span>Report ID:</span> GATEWAY-2026-03-20-001</div>
+        <div><span>Generated:</span> 2026-03-20 08:04 ET</div>
+        <div><span>Environment:</span> Internal Demo / Teams Channel Tab</div>
+        <div><span>Actor:</span> Priya Shah (priya.shah@contoso.com)</div>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>1. Registry Upload Status</h2>
+      <div class="upload-grid">
+        <div class="upload-item"><span class="k">Target Owner</span><span class="v">contoso-platform</span></div>
+        <div class="upload-item"><span class="k">API Name</span><span class="v">payments-gateway-api</span></div>
+        <div class="upload-item"><span class="k">Version</span><span class="v">2.4.0</span></div>
+        <div class="upload-item"><span class="k">Operation</span><span class="v">Create or Update API</span></div>
+        <div class="upload-item"><span class="k">Result</span><span class="v">Updated Successfully</span></div>
+        <div class="upload-item"><span class="k">HTTP Status</span><span class="v">200</span></div>
+        <div class="upload-item"><span class="k">Persistence</span><span class="v">Confirmed in SwaggerHub Registry</span></div>
+        <div class="upload-item"><span class="k">Publication State</span><span class="v">Unpublished</span></div>
+        <div class="upload-item" style="grid-column: 1 / -1;">
+          <span class="k">SwaggerHub Artifact</span>
+          <span class="v"><a href="https://app.swaggerhub.com/apis/contoso-platform/payments-gateway-api/2.4.0">https://app.swaggerhub.com/apis/contoso-platform/payments-gateway-api/2.4.0</a></span>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>2. API Inventory Summary</h2>
+      <div class="inventory-grid">
+        <div class="inventory-card"><div class="label">OpenAPI</div><div class="value">3.0.3</div></div>
+        <div class="inventory-card"><div class="label">Paths</div><div class="value">28</div></div>
+        <div class="inventory-card"><div class="label">Operations</div><div class="value">74</div></div>
+        <div class="inventory-card"><div class="label">Schemas</div><div class="value">41</div></div>
+        <div class="inventory-card"><div class="label">Tags</div><div class="value">11</div></div>
+        <div class="inventory-card"><div class="label">Servers</div><div class="value">4</div></div>
+        <div class="inventory-card"><div class="label">Security Schemes</div><div class="value">3</div></div>
+        <div class="inventory-card"><div class="label">API Title</div><div class="value text">Payments Gateway API</div></div>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>3. Governance Score</h2>
+      <div class="score-grid">
+        <div class="pill"><div class="label">Overall Score</div><div class="value">84/100</div></div>
+        <div class="pill"><div class="label">Grade</div><div class="value">B</div></div>
+        <div class="pill"><div class="label">Critical</div><div class="value sev-critical">1</div></div>
+        <div class="pill"><div class="label">Warning</div><div class="value sev-warning">7</div></div>
+      </div>
+      <div class="footer-note">Info findings: 12</div>
+    </section>
+
+    <section class="section">
+      <h2>4. SwaggerHub-Confirmed Findings</h2>
+      <table>
+        <thead>
+          <tr><th>Severity</th><th>Area</th><th>Finding</th><th>Location</th></tr>
+        </thead>
+        <tbody>
+      <tr>
+        <td class="sev-critical">Critical</td>
+        <td>Transport Security</td>
+        <td>Production server includes non-TLS URL (http://api.contoso.com/gateway).</td>
+        <td><code>servers[2].url</code></td>
+      </tr>
+      <tr>
+        <td class="sev-warning">Warning</td>
+        <td>Operation Design</td>
+        <td>5 operations are missing operationId.</td>
+        <td><code>paths.*.*.operationId</code></td>
+      </tr>
+      <tr>
+        <td class="sev-warning">Warning</td>
+        <td>Response Completeness</td>
+        <td>3 operations are missing explicit 4xx response definitions.</td>
+        <td><code>paths./payments/*</code></td>
+      </tr>
+      <tr>
+        <td class="sev-warning">Warning</td>
+        <td>Schema Clarity</td>
+        <td>9 schemas are missing description.</td>
+        <td><code>components.schemas.*.description</code></td>
+      </tr></tbody>
+      </table>
+    </section>
+
+    <section class="section">
+      <h2>5. Locally Derived Quality Findings</h2>
+      <table>
+        <thead>
+          <tr><th>Severity</th><th>Rule</th><th>Finding</th><th>Location</th></tr>
+        </thead>
+        <tbody>
+      <tr>
+        <td class="sev-warning">Warning</td>
+        <td>GOV-PAG-001</td>
+        <td>Pagination contract is inconsistent across list endpoints (page vs offset).</td>
+        <td><code>paths./transactions, paths./refunds</code></td>
+      </tr>
+      <tr>
+        <td class="sev-warning">Warning</td>
+        <td>GOV-NAM-003</td>
+        <td>Mixed enum naming style (PENDING_APPROVAL vs pending).</td>
+        <td><code>components.schemas.PaymentStatus</code></td>
+      </tr>
+      <tr>
+        <td class="sev-info">Info</td>
+        <td>GOV-OBS-004</td>
+        <td>Correlation header is documented in only 61% of operations.</td>
+        <td><code>parameters.X-Correlation-Id</code></td>
+      </tr>
+      <tr>
+        <td class="sev-info">Info</td>
+        <td>GOV-LIFE-002</td>
+        <td>Ownership metadata is incomplete for two gateway domains.</td>
+        <td><code>info.contact</code></td>
+      </tr></tbody>
+      </table>
+    </section>
+
+    <section class="section">
+      <h2>6. Top Findings (Priority Order)</h2>
+      <ol><li>Remove non-TLS production server URL and enforce HTTPS-only endpoints.</li><li>Add unique operationId for all operations to improve code generation reliability.</li><li>Standardize pagination model across all collection endpoints.</li><li>Complete schema descriptions for externally consumed DTOs.</li><li>Add and normalize error responses (400, 401, 403, 429) for gateway-protected operations.</li></ol>
+    </section>
+
+    <section class="section">
+      <h2>7. Recommended Fix Plan</h2>
+      <ul><li><strong>P0 (24h):</strong> Fix transport security issue and redeploy spec.</li><li><strong>P1 (2-3 days):</strong> Fill missing operationId and error responses.</li><li><strong>P2 (1 sprint):</strong> Align pagination and naming conventions.</li><li><strong>P2 (1 sprint):</strong> Improve schema and ownership metadata completeness.</li></ul>
+    </section>
+
+    <section class="section">
+      <h2>8. Release Readiness</h2>
+      <div class="kv">
+        <div class="k">Disposition</div><div>Conditional Pass</div>
+        <div class="k">Condition</div><div>Resolve all Critical findings before publish.</div>
+        <div class="k">Post-Fix Target Score</div><div>92+ (Grade A)</div>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>9. Report Artifacts</h2>
+      <ul><li><code>report.json</code></li><li><code>report.md</code></li><li><code>source-spec.yaml</code></li><li><code>metadata.json</code></li></ul>
+    </section>
+  </div>
+</body>
+</html>
